@@ -1,0 +1,109 @@
+# =============================================================================
+# Juniper SRX Transit Security Detection Probe — EXAMPLE configuration
+#
+# Copy this file to `probe_config.yaml` (which is gitignored) and fill in
+# real values. NEVER commit real credentials or production host details.
+#
+# The probe loads configuration from the path in the PROBE_CONFIG environment
+# variable, or falls back to `config/probe_config.yaml`.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Juniper SRX under test (NETCONF / PyEZ access)
+# -----------------------------------------------------------------------------
+srx:
+  host: 192.0.2.1                # Management IP/hostname of the SRX (RFC 5737 TEST-NET placeholder)
+  netconf_port: 830              # NETCONF-over-SSH port (default 830)
+  username: probe-readonly       # A read-only NETCONF account is sufficient
+
+  # Provide EITHER a password OR an ssh_key (ssh_key takes precedence if both set).
+  password: "CHANGE_ME"          # Plain password (prefer ssh_key or a secrets manager)
+  ssh_key: ""                    # Path to a private key, e.g. ~/.ssh/srx_probe_id_ed25519
+
+  connect_timeout: 30            # Seconds to wait for the NETCONF session
+
+# -----------------------------------------------------------------------------
+# Syslog collector — where the SRX streams structured security logs.
+# Configure the SRX with:
+#   set security log mode stream
+#   set security log format sd-syslog
+#   set security log stream <name> host <this collector ip> port <port>
+# -----------------------------------------------------------------------------
+syslog:
+  bind_addr: 0.0.0.0             # Address the collector listens on
+  bind_port: 5514                # UDP/TCP port the SRX streams to (use 514 if privileged)
+  protocol: udp                  # udp | tcp
+  buffer_max_events: 100000      # Max events retained in the in-memory buffer
+
+# -----------------------------------------------------------------------------
+# Egress ground-truth packet capture (independent observation channel).
+# -----------------------------------------------------------------------------
+capture:
+  interface: eth1                # Interface on the egress/transit path to capture
+  tool: tshark                   # tshark | tcpdump
+  snaplen: 256                   # Bytes captured per packet (enough for headers + small payload)
+  output_dir: captures           # Where pcaps are written (gitignored)
+
+# -----------------------------------------------------------------------------
+# Traffic targets. These must be hosts/URLs you are AUTHORIZED to test against
+# and that route through the SRX transit path.
+# -----------------------------------------------------------------------------
+targets:
+  # Generic L3/L4 + L7 target (scapy/curl/nmap/hping3 stimulus destination)
+  primary_host: 203.0.113.10     # RFC 5737 TEST-NET placeholder
+
+  # Ports used by session create vs deny tests
+  allowed_tcp_port: 80           # Expected to be PERMITTED by SRX policy
+  denied_tcp_port: 9             # Expected to be DENIED by SRX policy (row 2)
+
+  # L7 scriptable service endpoints (row 8: App-ID generic)
+  http_url: "http://203.0.113.10/"
+  dns_server: 203.0.113.53
+  ftp_host: 203.0.113.21
+  ssh_host: 203.0.113.22
+
+  # Browser-driven targets (rows 9-12). Use lab/categorized URLs you control.
+  webapp_url: "https://webapp.lab.example/"          # web-app App-ID (row 9)
+  filtered_url: "https://blocked.lab.example/"        # categorized/blocked URL (row 10)
+  tls_sni_hosts:                                      # SSL-proxy SNI variation (row 11)
+    - "a.lab.example"
+    - "b.lab.example"
+
+  # UTM/AV + content filtering (rows 13-14): an HTTP endpoint that serves the
+  # EICAR test file. EICAR is a SAFE antivirus test string, not malware.
+  eicar_url: "http://203.0.113.10/eicar.com"
+
+# -----------------------------------------------------------------------------
+# Detection thresholds & correlation tuning.
+# -----------------------------------------------------------------------------
+thresholds:
+  # Correlation time window (seconds) around each stimulus timestamp.
+  correlation_window_s: 10.0
+  # Allowed clock skew (seconds) between generator host, SRX, and collector.
+  clock_skew_s: 2.0
+
+  # Scale test targets (rows 15-17).
+  session_volume_target: 10000   # Concurrent sessions wrk should drive
+  throughput_target_mbps: 1000   # Sustained throughput iperf3 should drive
+  expected_ipfix_flows: 1000     # Known flow count to compare against IPFIX export
+
+# -----------------------------------------------------------------------------
+# Bounded attack-generation safety limits. Floods/scans are RATE-LIMITED.
+# Keep these conservative; raise only in an isolated, authorized lab.
+# -----------------------------------------------------------------------------
+attack_limits:
+  flood_packets: 2000            # Max packets per flood burst (row 6)
+  flood_rate_pps: 500            # Max packets/sec for floods
+  scan_max_ports: 1024           # Max ports per scan (row 3)
+  frag_count: 8                  # Number of fragments per fragmentation test (row 5)
+
+# -----------------------------------------------------------------------------
+# Safe synthetic signatures. DO NOT replace these with live malware.
+# -----------------------------------------------------------------------------
+signatures:
+  # EICAR antivirus test string (standard, harmless AV test artifact).
+  eicar: 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+  # GTUBE spam test string (standard, harmless anti-spam test artifact).
+  gtube: 'XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X'
+  # Expected SRX-reported names (used by assertions to confirm identity).
+  expected_av_name: "EICAR-Test-File"

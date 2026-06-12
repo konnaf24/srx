@@ -1,0 +1,180 @@
+# Juniper SRX Transit Security Detection Probe
+
+A **telemetry-validation test suite** that verifies a Juniper SRX deployed in
+**internet transit mode** correctly **emits security telemetry** when it
+processes internet-bound traffic — including malicious / synthetic-attack
+patterns.
+
+> This suite validates **DETECTION & LOGGING behavior**, not configuration,
+> zone, policy, or routing correctness. The question it answers is:
+>
+> *"When a known stimulus crosses the SRX, does the SRX emit the expected
+> telemetry, with complete fields, that we can correlate back to exactly that
+> stimulus?"*
+
+The telemetry sources validated include: `RT_FLOW` session logs (create / close
+/ deny), `RT_IDP` / IPS attack events, AppSecure (AppTrack App-ID, AppFW,
+content/URL filtering), UTM / antivirus, screen (anomaly / flood / scan / frag)
+events, the NETCONF session table, and flow / IPFIX (J-Flow) export.
+
+---
+
+## ⚠️ Safety warning
+
+- **Synthetic / safe signatures only.** This suite uses industry-standard
+  *test* artifacts: the [EICAR](https://www.eicar.org/) antivirus test string,
+  the [GTUBE](https://spamassassin.apache.org/gtube/) spam test string, and
+  standard `nmap` scan types. **It never uses or transmits live malware.**
+- **Authorized environments only.** Scan, flood, and malformed-packet
+  generation can disrupt networks and may be illegal against systems you do not
+  own. Run this **only** in an authorized lab or transit test environment
+  against targets you control or have written permission to test.
+- Floods and scans are **rate-limited and bounded** by configuration; review
+  `config/probe_config.example.yaml` before running live tests.
+
+---
+
+## Architecture
+
+```
+[Test Workload Generator] --internet-bound traffic-->
+        [Juniper SRX transit enforcement point] --> Internet / external
+                          |
+                          | SRX emits telemetry
+                          v
+              [Log / Event Collector]
+                          |
+                          v
+        [Validation / Correlation Engine]
+                          |
+                          v
+                 [Report / Findings]
+```
+
+Four functional layers:
+
+1. **Generation** — produce a *known* event (a specific 5-tuple + payload at a
+   known timestamp).
+2. **Telemetry sources** — the SRX features under test that should emit logs /
+   events.
+3. **Collection pipeline** — a syslog listener, NETCONF queries, and an
+   independent egress packet capture (ground truth).
+4. **Validation engine** — correlate sent stimulus against collected telemetry
+   and assert the expected events appeared with the expected fields.
+
+Core loop: **generate a known event → capture every telemetry stream → assert
+the expected events appeared with the expected fields.** See `docs/` for the
+full design.
+
+---
+
+## Repository layout
+
+| Path | Description |
+| --- | --- |
+| `README.md` | This file. |
+| `requirements.txt` | Python dependencies (+ notes on required system binaries). |
+| `.gitignore` | Ignores venvs, caches, pcaps, Playwright artifacts, local config. |
+| `docs/01-architecture.md` | Stimulus→observation→correlation pipeline and the four layers. |
+| `docs/02-telemetry-sources.md` | Enumeration of every SRX telemetry source validated. |
+| `docs/03-detection-tool-mapping.md` | Detection target → Junos event → generator → stimulus → ground-truth table. |
+| `docs/04-workload-layer-rationale.md` | Why the workload layer is layered, and when (not) to use a browser. |
+| `docs/05-correlation-model.md` | The correlation contract and the detection-coverage matrix. |
+| `config/probe_config.example.yaml` | Documented example configuration (copy to `probe_config.yaml`). |
+| `generators/packet_gen.py` | scapy: malformed packets, bad flags/checksums, fragmentation, crafted L3/L4. |
+| `generators/scan_gen.py` | nmap / hping3 wrappers: SYN/XMAS/FIN scans, flood / rate patterns. |
+| `generators/l7_client.py` | curl/requests: raw HTTP, DNS, FTP, SSH; EICAR & GTUBE delivery. |
+| `generators/browser_gen.py` | Playwright: web-app App-ID, URL filtering, SSL-proxy, block-page screenshot. |
+| `generators/load_gen.py` | wrk / iperf3 wrappers: session volume + throughput. |
+| `collectors/syslog_collector.py` | Threaded UDP/TCP syslog listener; parses structured Junos sd-syslog. |
+| `collectors/srx_query.py` | PyEZ (junos-eznc) NETCONF wrapper: flow sessions, screen stats, IDP counters. |
+| `collectors/pcap_capture.py` | tshark / tcpdump egress ground-truth capture wrapper. |
+| `validation/correlator.py` | Match sent stimulus (5-tuple + timestamp) against collected telemetry. |
+| `validation/assertions.py` | Helper assertions: event_present, field_complete, signature_id_match, etc. |
+| `tests/conftest.py` | pytest fixtures: load config, start collectors, teardown; marker registration. |
+| `tests/test_session_events.py` | Session create / close / deny (scapy / curl). |
+| `tests/test_screen_events.py` | Scans, floods, fragmentation, malformed (nmap / hping3 / scapy). |
+| `tests/test_idp_signatures.py` | IDP / IPS signature match (EICAR / GTUBE / test sigs). |
+| `tests/test_appsecure.py` | App-ID generic + web-app, AppFW (l7_client + Playwright). |
+| `tests/test_webfilter.py` | URL / web filtering, block-page (Playwright). |
+| `tests/test_utm_av.py` | Antivirus / content filtering (EICAR file via curl / Playwright). |
+| `tests/test_scale_flow.py` | Session volume, throughput, IPFIX export accuracy (wrk / iperf3). |
+
+---
+
+## Install
+
+```bash
+# 1. Create and activate a virtual environment
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# Linux/macOS:
+source venv/bin/activate
+
+# 2. Install Python dependencies
+pip install -r requirements.txt
+
+# 3. Install Playwright browser binaries (needed for browser_gen.py)
+playwright install
+
+# 4. Ensure system binaries are present for live tests:
+#    nmap, hping3, wrk, iperf3, tshark (or tcpdump)
+```
+
+---
+
+## Configure
+
+```bash
+cp config/probe_config.example.yaml config/probe_config.yaml
+# Edit config/probe_config.yaml with your SRX host, NETCONF credentials,
+# syslog collector bind address, egress capture interface, target hosts/URLs,
+# and thresholds.
+```
+
+`config/probe_config.yaml` is **gitignored** — only the `.example` file is
+tracked. Never commit real credentials.
+
+The collectors and generators read configuration via `PROBE_CONFIG`
+(environment variable pointing at the YAML file) or default to
+`config/probe_config.yaml`.
+
+---
+
+## Run
+
+**Offline logic tests** (pure-Python correlator / assertion logic; no hardware
+required — these run green in CI):
+
+```bash
+pytest -m "not requires_srx"
+```
+
+**Full run against a live SRX** (requires configured hardware, system binaries,
+and elevated privileges for packet capture / crafting):
+
+```bash
+# Run everything, including tests marked requires_srx:
+sudo PROBE_CONFIG=config/probe_config.yaml pytest
+```
+
+Tests that require live infrastructure are marked `@pytest.mark.requires_srx`
+and are **deselected** by `-m "not requires_srx"`, so the suite can always be
+collected and the logic layer can be exercised without an SRX.
+
+---
+
+## How it all fits together
+
+1. A **generator** emits a known stimulus and records its 5-tuple + timestamp.
+2. The **syslog collector** (and NETCONF queries + egress pcap) capture
+   everything the SRX emits.
+3. The **correlator** matches the stimulus to telemetry by 5-tuple within a
+   time window.
+4. **assertions** verify the event is present, fields are complete, and (where
+   relevant) the signature / app / category matches.
+5. The result is a **detection-coverage matrix**: for each event type — was it
+   detected? logged? were all fields present?
+
+See `docs/05-correlation-model.md` for the correlation contract.

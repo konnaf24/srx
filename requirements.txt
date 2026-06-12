@@ -1,0 +1,35 @@
+# Juniper SRX Transit Security Detection Probe — Python dependencies
+#
+# Python library dependencies are listed below. Note that several generators
+# and collectors also rely on SYSTEM BINARIES that are NOT installable via pip:
+#
+#   nmap      - TCP/UDP scan generation (scan_gen.py)
+#   hping3    - crafted floods / scans (scan_gen.py)
+#   wrk       - HTTP load / session-volume generation (load_gen.py)
+#   iperf3    - throughput / flow-volume generation (load_gen.py)
+#   tshark    - egress ground-truth packet capture (pcap_capture.py)
+#               (tcpdump is supported as a fallback)
+#
+# After installing these Python packages, also run:
+#
+#   playwright install
+#
+# to download the browser binaries used by browser_gen.py.
+
+# --- Packet crafting (L3/L4 stimulus) ---
+scapy==2.5.0
+
+# --- L7 scriptable clients (raw HTTP/DNS/FTP/SSH, EICAR/GTUBE delivery) ---
+requests==2.31.0
+
+# --- Config parsing ---
+PyYAML==6.0.1
+
+# --- SRX NETCONF / PyEZ (live session/screen/IDP queries) ---
+junos-eznc==2.7.1
+
+# --- Browser automation (web-app App-ID, URL filtering, SSL-proxy, block-page) ---
+playwright==1.44.0
+
+# --- Test framework ---
+pytest==8.2.0
