@@ -1,5 +1,29 @@
 # Juniper SRX Transit Security Detection Probe
 
+## Detection coverage matrix
+
+| # | SRX telemetry / detection target | Junos log/event | Best generator | Concrete stimulus | Ground-truth check |
+|---|---|---|---|---|---|
+| 1 | Session create/close (basic flow) | `RT_FLOW_SESSION_CREATE` / `_CLOSE` | curl / scapy | Single TCP connection to known dst | `show security flow session` + syslog 5-tuple match |
+| 2 | Session deny (policy drop) | `RT_FLOW_SESSION_DENY` | scapy / hping3 | Packet to a denied port/dst | Deny event present, no create event |
+| 3 | TCP scan detection | `RT_IDP` / screen events | nmap / hping3 | nmap -sS, -sX, -sF (SYN/Xmas/FIN) | Screen counter incr + per-scan log |
+| 4 | Malformed / anomalous packets | screen / IDP anomaly | scapy | Bad flag combos, bad checksums, tiny TTL | Anomaly event with correct subtype |
+| 5 | IP fragmentation attacks | screen (teardrop, frag) | scapy | Overlapping/oversized fragments | Frag-attack screen event |
+| 6 | Flood / rate-based (SYN, ICMP, UDP) | screen flood events | hping3 / scapy | hping3 --flood -S controlled rate | Flood threshold event at expected rate |
+| 7 | IDS/IPS signature match | `RT_IDP_ATTACK_LOG` | scapy / custom client | EICAR over HTTP, GTUBE, Juniper test sigs | IDP attack event w/ correct signature ID |
+| 8 | App-ID (generic protocols) | `APPTRACK_SESSION_*` | curl / custom client | Raw HTTP, DNS, FTP, SSH handshakes | AppTrack app-name field correct |
+| 9 | App-ID (web apps) | `APPTRACK` app-name | Playwright | Real navigation to the web app | App correctly classified (e.g. dropbox) |
+| 10 | URL / web filtering | `WEBFILTER_URL_*` | Playwright | Navigate to categorized/blocked URLs | Category match + block-page rendered |
+| 11 | SSL proxy / decryption | SSL-proxy logs | Playwright | Real TLS handshake, varied SNI/certs | Cert/SNI fields + decryption status |
+| 12 | AppFW (app-based policy) | `APPTRACK` + policy | Playwright / curl | App that violates app-firewall rule | Block + app-fw event |
+| 13 | Content filtering (file/MIME) | `CONTENT_FILTERING_*` | curl / Playwright | Download blocked MIME / EICAR file | Content-filter block event |
+| 14 | Antivirus / UTM | `AV_VIRUS_DETECTED` | curl | EICAR test file over HTTP | AV event, correct virus name (EICAR) |
+| 15 | Session volume / scale events | flow counters | wrk / iperf3 | High concurrent connection count | Session-count threshold telemetry |
+| 16 | Throughput / bandwidth | flow stats, J-Flow | iperf3 | Sustained N Gbps stream | Byte counters in flow records |
+| 17 | Flow export / IPFIX accuracy | J-Flow / IPFIX | iperf3 + scapy | Known flow count/sizes | Exported records match sent flows |
+
+---
+
 A **telemetry-validation test suite** that verifies a Juniper SRX deployed in
 **internet transit mode** correctly **emits security telemetry** when it
 processes internet-bound traffic — including malicious / synthetic-attack
