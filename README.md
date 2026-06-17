@@ -99,6 +99,7 @@ full design.
 | `README.md` | This file. |
 | `requirements.txt` | Python dependencies (+ notes on required system binaries). |
 | `.gitignore` | Ignores venvs, caches, pcaps, Playwright artifacts, local config. |
+| `docs/00-agent-spec.md` | Agent role/objective spec: what telemetry to validate (detection & logging), not configuration. |
 | `docs/01-architecture.md` | Stimulus→observation→correlation pipeline and the four layers. |
 | `docs/02-telemetry-sources.md` | Enumeration of every SRX telemetry source validated. |
 | `docs/03-detection-tool-mapping.md` | Detection target → Junos event → generator → stimulus → ground-truth table. |
