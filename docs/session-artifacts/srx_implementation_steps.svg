@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1000" viewBox="0 0 1200 1000" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#37474f"/>
+    </marker>
+    <marker id="arrowLoop" markerWidth="11" markerHeight="11" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#e65100"/>
+    </marker>
+    <style>
+      .title { font-size: 27px; font-weight: 700; fill: #102027; }
+      .sub   { font-size: 14px; fill: #546e7a; }
+      .num   { font-size: 20px; font-weight: 800; fill: #ffffff; }
+      .step  { font-size: 16px; font-weight: 700; fill: #ffffff; }
+      .desc  { font-size: 12.5px; fill: #eceff1; }
+      .tool  { font-size: 11.5px; font-weight: 700; }
+      .loop  { font-size: 13px; font-weight: 700; fill: #e65100; font-style: italic; }
+      .leg   { font-size: 12.5px; fill: #37474f; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="1000" fill="#f5f7fa"/>
+  <text x="40" y="46" class="title">From Idea to Iteration — a Vibe-Coding Workflow</text>
+  <text x="40" y="70" class="sub">9 steps · idea → spec → build → test → commit → enhance</text>
+
+  <!-- STEP 1 -->
+  <rect x="60" y="100" width="330" height="92" rx="12" fill="#5c6bc0"/>
+  <circle cx="98" cy="146" r="20" fill="#3949ab"/><text x="91" y="153" class="num">1</text>
+  <text x="130" y="138" class="step">Idea</text>
+  <text x="130" y="162" class="desc">The spark — what you want to build.</text>
+  <path d="M225,192 L225,222" stroke="#37474f" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- STEP 2 -->
+  <rect x="60" y="224" width="330" height="110" rx="12" fill="#455a64"/>
+  <circle cx="98" cy="279" r="20" fill="#263238"/><text x="91" y="286" class="num">2</text>
+  <text x="130" y="256" class="step">Vibe in Claude-free</text>
+  <rect x="130" y="266" width="150" height="20" rx="10" fill="#8e24aa"/><text x="140" y="281" class="tool" fill="#fff">better harness</text>
+  <text x="130" y="308" class="desc">Reiterate the idea and shape</text>
+  <text x="130" y="325" class="desc">a spec roughly inline with it.</text>
+  <path d="M225,334 L225,364" stroke="#37474f" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- STEP 3 -->
+  <rect x="60" y="366" width="330" height="110" rx="12" fill="#00695c"/>
+  <circle cx="98" cy="421" r="20" fill="#004d40"/><text x="91" y="428" class="num">3</text>
+  <text x="130" y="398" class="step">Spec → Copilot CLI</text>
+  <rect x="130" y="408" width="200" height="20" rx="10" fill="#1565c0"/><text x="140" y="423" class="tool" fill="#fff">unlimited HPE tokens · better models</text>
+  <text x="130" y="450" class="desc">Insert the spec into the GitHub</text>
+  <text x="130" y="467" class="desc">Copilot CLI to start building.</text>
+  <path d="M225,476 L225,506" stroke="#37474f" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- STEP 4 -->
+  <rect x="60" y="508" width="330" height="92" rx="12" fill="#455a64"/>
+  <circle cx="98" cy="554" r="20" fill="#263238"/><text x="91" y="561" class="num">4</text>
+  <text x="130" y="546" class="step">Vibe further</text>
+  <text x="130" y="570" class="desc">New "ideas" surface — refine</text>
+  <text x="130" y="587" class="desc">and expand the direction.</text>
+  <path d="M225,600 L225,630" stroke="#37474f" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- STEP 5 -->
+  <rect x="60" y="632" width="330" height="80" rx="12" fill="#6d4c41"/>
+  <circle cx="98" cy="672" r="20" fill="#4e342e"/><text x="91" y="679" class="num">5</text>
+  <text x="130" y="664" class="step">Commit output to git</text>
+  <text x="130" y="690" class="desc">Checkpoint the generated work.</text>
+
+  <!-- 5 -> 6 cross -->
+  <path d="M390,672 L470,672 Q490,672 490,652 L490,240 Q490,220 510,220 L560,220"
+        stroke="#37474f" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- STEP 6 -->
+  <rect x="810" y="176" width="330" height="92" rx="12" fill="#00838f"/>
+  <circle cx="848" cy="222" r="20" fill="#006064"/><text x="841" y="229" class="num">6</text>
+  <text x="880" y="214" class="step">Vibe in Copilot app</text>
+  <text x="880" y="238" class="desc">Drive the implementation with</text>
+  <text x="880" y="255" class="desc">the Copilot desktop app.</text>
+  <path d="M975,268 L975,298" stroke="#37474f" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- STEP 7 -->
+  <rect x="810" y="300" width="330" height="92" rx="12" fill="#ef6c00"/>
+  <circle cx="848" cy="346" r="20" fill="#e65100"/><text x="841" y="353" class="num">7</text>
+  <text x="880" y="338" class="step">Test &amp; reiterate</text>
+  <text x="880" y="362" class="desc">Run it, find gaps, loop back</text>
+  <text x="880" y="379" class="desc">and fix.</text>
+  <path d="M975,392 L975,422" stroke="#37474f" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- STEP 8 -->
+  <rect x="810" y="424" width="330" height="80" rx="12" fill="#6d4c41"/>
+  <circle cx="848" cy="464" r="20" fill="#4e342e"/><text x="841" y="471" class="num">8</text>
+  <text x="880" y="456" class="step">Commit "final" version</text>
+  <text x="880" y="482" class="desc">Tag the working milestone.</text>
+  <path d="M975,504 L975,534" stroke="#37474f" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- STEP 9 -->
+  <rect x="810" y="536" width="330" height="92" rx="12" fill="#8e24aa"/>
+  <circle cx="848" cy="582" r="20" fill="#6a1b9a"/><text x="841" y="589" class="num">9</text>
+  <text x="880" y="574" class="step">Vibe more — enhance…</text>
+  <text x="880" y="598" class="desc">Keep polishing, extending,</text>
+  <text x="880" y="615" class="desc">and iterating (etc, etc).</text>
+
+  <!-- loop 9 -> 6 -->
+  <path d="M1140,582 Q1180,582 1180,430 Q1180,222 1145,222"
+        stroke="#e65100" stroke-width="2.5" fill="none" stroke-dasharray="7,5" marker-end="url(#arrowLoop)"/>
+  <text x="1150" y="405" class="loop" transform="rotate(90 1150 405)">continuous iteration</text>
+
+  <!-- loop 7 -> 6 -->
+  <path d="M810,346 Q770,346 770,300 Q770,222 808,222"
+        stroke="#e65100" stroke-width="2" fill="none" stroke-dasharray="6,5" marker-end="url(#arrowLoop)"/>
+  <text x="712" y="290" class="loop">reiterate</text>
+
+  <!-- loop 4 -> 3 -->
+  <path d="M60,554 Q30,554 30,470 Q30,421 58,421"
+        stroke="#e65100" stroke-width="2" fill="none" stroke-dasharray="6,5" marker-end="url(#arrowLoop)"/>
+
+  <!-- Legend -->
+  <rect x="60" y="800" width="1080" height="150" rx="12" fill="#ffffff" stroke="#b0bec5" stroke-width="1.5"/>
+  <text x="82" y="832" class="sub" font-weight="700" font-size="16" fill="#102027">Legend — colour = phase / tool</text>
+  <rect x="82" y="850" width="18" height="18" rx="4" fill="#5c6bc0"/><text x="108" y="864" class="leg">Idea</text>
+  <rect x="82" y="878" width="18" height="18" rx="4" fill="#455a64"/><text x="108" y="892" class="leg">Vibe / ideation (Claude-free · CLI)</text>
+  <rect x="82" y="906" width="18" height="18" rx="4" fill="#00695c"/><text x="108" y="920" class="leg">Copilot CLI (spec → build)</text>
+  <rect x="430" y="850" width="18" height="18" rx="4" fill="#00838f"/><text x="456" y="864" class="leg">Copilot app (implementation)</text>
+  <rect x="430" y="878" width="18" height="18" rx="4" fill="#ef6c00"/><text x="456" y="892" class="leg">Test &amp; reiterate</text>
+  <rect x="430" y="906" width="18" height="18" rx="4" fill="#6d4c41"/><text x="456" y="920" class="leg">Commit to git</text>
+  <rect x="780" y="850" width="18" height="18" rx="4" fill="#8e24aa"/><text x="806" y="864" class="leg">Enhance (ongoing)</text>
+  <line x1="780" y1="886" x2="806" y2="886" stroke="#e65100" stroke-width="2.5" stroke-dasharray="6,5"/><text x="814" y="891" class="leg">iteration / reiterate loop</text>
+  <text x="780" y="920" class="leg" fill="#546e7a">Tokens/models pick the tool per phase.</text>
+</svg>
