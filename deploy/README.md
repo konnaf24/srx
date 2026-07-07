@@ -15,8 +15,8 @@ generators end-to-end. They turn the manual SSH setup into repeatable code.
 ```
 
 Reference lab used during development:
-- generator = `84.254.1.46`
-- target    = `84.254.1.45`
+- generator = `10.10.10.46`
+- target    = `10.10.10.45`
 
 ## 1. Generator host
 
@@ -48,12 +48,12 @@ Ad-hoc CLI wrapping the repo's generators. Run from the repo root with the venv.
 ```bash
 # everything (aggressive workloads need root + a confirm prompt; --yes skips it)
 sudo ./venv/bin/python deploy/srx_workload.py \
-    --target 84.254.1.45 --src 84.254.1.46 --yes all
+    --target 10.10.10.45 --src 10.10.10.46 --yes all
 
 # single workloads
-./venv/bin/python deploy/srx_workload.py --target 84.254.1.45 http --port 80
-sudo ./venv/bin/python deploy/srx_workload.py --target 84.254.1.45 scan --type xmas
-sudo ./venv/bin/python deploy/srx_workload.py --target 84.254.1.45 flood --type syn --count 2000 --rate 500
+./venv/bin/python deploy/srx_workload.py --target 10.10.10.45 http --port 80
+sudo ./venv/bin/python deploy/srx_workload.py --target 10.10.10.45 scan --type xmas
+sudo ./venv/bin/python deploy/srx_workload.py --target 10.10.10.45 flood --type syn --count 2000 --rate 500
 ```
 
 Subcommands: `all http dns handshake eicar gtube scan flood malformed badcsum

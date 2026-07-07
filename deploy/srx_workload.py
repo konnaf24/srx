@@ -8,7 +8,7 @@ packet_gen, load_gen) and actually emits traffic.
 
 Run from the repo root (so `generators` / `validation` import), using the venv:
 
-    sudo ./venv/bin/python srx_workload.py --target 84.254.1.45 all
+    sudo ./venv/bin/python srx_workload.py --target 10.10.10.45 all
     ./venv/bin/python srx_workload.py --target 1.2.3.4 http --port 80
     sudo ./venv/bin/python srx_workload.py --target 1.2.3.4 scan --type syn
 

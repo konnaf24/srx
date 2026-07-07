@@ -44,7 +44,7 @@
 
   <!-- Step 3 -->
   <rect x="40" y="290" width="300" height="98" rx="10" fill="#1565c0"/>
-  <text x="58" y="318" class="step">3 · Deploy to 84.254.1.46</text>
+  <text x="58" y="318" class="step">3 · Deploy to 10.10.10.46</text>
   <text x="58" y="339" class="stepn">apt tools · venv · pip install</text>
   <text x="58" y="358" class="stepn">playwright + chromium (t64 libs)</text>
   <text x="58" y="377" class="stepn">pytest -m "not requires_srx" = 30 pass</text>
@@ -63,7 +63,7 @@
   <rect x="40" y="512" width="300" height="80" rx="10" fill="#6a1b9a"/>
   <text x="58" y="540" class="step">5 · Safety gate</text>
   <text x="58" y="561" class="stepn">Declined attack vs arbitrary hosts</text>
-  <text x="58" y="580" class="stepn">Only owned/authorized: 84.254.1.45</text>
+  <text x="58" y="580" class="stepn">Only owned/authorized: 10.10.10.45</text>
 
   <line x1="190" y1="592" x2="190" y2="612" stroke="#37474f" stroke-width="2" marker-end="url(#arrow)"/>
 
@@ -85,7 +85,7 @@
   <!-- Generator host box -->
   <rect x="430" y="150" width="300" height="300" rx="14" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
   <text x="450" y="180" class="host">Generator host</text>
-  <text x="450" y="200" class="lbl">84.254.1.46</text>
+  <text x="450" y="200" class="lbl">10.10.10.46</text>
   <rect x="452" y="214" width="256" height="26" rx="6" fill="#ffffff" stroke="#90caf9"/>
   <text x="462" y="232" class="small">~/srx  +  venv  +  python deps</text>
   <rect x="452" y="246" width="256" height="26" rx="6" fill="#ffffff" stroke="#90caf9"/>
@@ -102,7 +102,7 @@
   <!-- Target host box -->
   <rect x="840" y="150" width="300" height="300" rx="14" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
   <text x="860" y="180" class="host" fill="#1b5e20">Target host (owned)</text>
-  <text x="860" y="200" class="lbl">84.254.1.45</text>
+  <text x="860" y="200" class="lbl">10.10.10.45</text>
   <rect x="862" y="214" width="256" height="30" rx="6" fill="#ffffff" stroke="#a5d6a7"/>
   <text x="872" y="234" class="svc">nginx  :80   (+ /eicar.com, index)</text>
   <rect x="862" y="250" width="256" height="30" rx="6" fill="#ffffff" stroke="#a5d6a7"/>
@@ -125,7 +125,7 @@
 
   <!-- ======= Results panel ======= -->
   <rect x="430" y="500" width="710" height="300" rx="14" fill="#ffffff" stroke="#b0bec5" stroke-width="1.5"/>
-  <text x="450" y="530" class="lbl" font-size="17">Final workload run — 84.254.1.46 → 84.254.1.45 (all GREEN)</text>
+  <text x="450" y="530" class="lbl" font-size="17">Final workload run — 10.10.10.46 → 10.10.10.45 (all GREEN)</text>
 
   <text x="452" y="562" class="small">✅ HTTP GET → 200</text>
   <text x="452" y="586" class="small">✅ DNS query → answered (dnsmasq)</text>
@@ -141,7 +141,7 @@
   <line x1="452" y1="676" x2="1118" y2="676" stroke="#eceff1" stroke-width="1.5"/>
   <text x="452" y="700" class="small" font-weight="700">Re-run:</text>
   <text x="452" y="724" class="small" font-family="Consolas, monospace">cd ~/srx &amp;&amp; sudo ./venv/bin/python srx_workload.py \</text>
-  <text x="452" y="744" class="small" font-family="Consolas, monospace">    --target 84.254.1.45 --src 84.254.1.46 --yes all</text>
+  <text x="452" y="744" class="small" font-family="Consolas, monospace">    --target 10.10.10.45 --src 10.10.10.46 --yes all</text>
 
   <text x="452" y="778" class="small" fill="#c62828" font-weight="700">⚠ Rotate the plaintext SSH passwords · aggressive traffic = authorized hosts only</text>
 </svg>

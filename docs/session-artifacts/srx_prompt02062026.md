@@ -4,8 +4,8 @@ Session transcript — SRX Transit Security Detection Probe deployment & workloa
 Date: 2026-07-02
 
 Hosts:
-- Generator host: 84.254.1.46 (Ubuntu 24.04, user kostas)
-- Target host:    84.254.1.45 (Ubuntu 24.04, user kostas) — reverse DNS ipa45.1.tellas.gr
+- Generator host: 10.10.10.46 (Ubuntu 24.04, user kostas)
+- Target host:    10.10.10.45 (Ubuntu 24.04, user kostas) — reverse DNS ipa45.1.tellas.gr
 
 Repo: https://github.com/konnaf24/srx
 
@@ -36,7 +36,7 @@ Run:
 - Offline logic tests: `pytest -m "not requires_srx"`
 - Full live: `sudo PROBE_CONFIG=config/probe_config.yaml pytest`
 
-### 3. Deploy to remote Linux (84.254.1.46)
+### 3. Deploy to remote Linux (10.10.10.46)
 Connected via SSH (paramiko; sshpass unavailable). Installed:
 - apt: nmap, hping3, wrk, iperf3, tshark, python3-venv, python3-pip, git
   (non-interactive; preseeded wireshark-common setuid + iperf3 no-daemon)
@@ -59,7 +59,7 @@ User asked to run "everything against arbitrary internet destinations" — DECLI
 (unauthorized scans/floods against third-party hosts are illegal/harmful). Offered to run
 against hosts the user owns/is authorized to test.
 
-### 5. Run against 84.254.1.45 (user-owned)
+### 5. Run against 10.10.10.45 (user-owned)
 Built `run_workload.py` driver, ran the full matrix from .46 -> .45. All generators fired.
 Only SSH/22 was open on the target initially, so HTTP/DNS/FTP/EICAR/GTUBE/wrk/iperf3
 returned "connection refused" (no services), while scans/floods/scapy packets sent fine.
@@ -72,14 +72,14 @@ Deployed to ~/srx/srx_workload.py on .46 (also saved to session files/).
 
 Usage:
     cd ~/srx
-    sudo ./venv/bin/python srx_workload.py --target 84.254.1.45 --yes all
+    sudo ./venv/bin/python srx_workload.py --target 10.10.10.45 --yes all
     ./venv/bin/python srx_workload.py --target <ip> http --port 80
     sudo ./venv/bin/python srx_workload.py --target <ip> scan --type xmas
 
-### 7. Set up server side on 84.254.1.45 so workloads complete
+### 7. Set up server side on 10.10.10.45 so workloads complete
 Connected to .45, installed & configured:
 - nginx (port 80) + /var/www/html/eicar.com (EICAR string) + index.html
-- dnsmasq (port 53, bound to 84.254.1.45 public IP, bind-interfaces, so it coexists
+- dnsmasq (port 53, bound to 10.10.10.45 public IP, bind-interfaces, so it coexists
   with systemd-resolved on loopback)
 - vsftpd (port 21)
 - iperf3 server (port 5201, systemd)
@@ -93,26 +93,26 @@ Re-ran full suite .46 -> .45. All green:
 - wrk: 133,302 requests in 5s, 26,563 req/s, 32 MB
 - iperf3: connected, ~3.5 Gbit/s per stream (4 streams)
 
-Note: in `all` mode scapy defaults --src to target; pass `--src 84.254.1.46` to stamp
+Note: in `all` mode scapy defaults --src to target; pass `--src 10.10.10.46` to stamp
 the real generator IP.
 
 ---
 
 ## Final state
 
-Generator host 84.254.1.46:
+Generator host 10.10.10.46:
 - ~/srx (repo) + ~/srx/venv + all Python deps + playwright chromium
 - system tools: nmap, hping3, wrk, iperf3, tshark
 - ~/srx/srx_workload.py (ad-hoc CLI driver)
 - config/probe_config.yaml
 
-Target host 84.254.1.45:
+Target host 10.10.10.45:
 - nginx:80 (+ eicar.com), dnsmasq:53, vsftpd:21, iperf3:5201
 
 ## Re-run command
-    ssh kostas@84.254.1.46
+    ssh kostas@10.10.10.46
     cd ~/srx
-    sudo ./venv/bin/python srx_workload.py --target 84.254.1.45 --src 84.254.1.46 --yes all
+    sudo ./venv/bin/python srx_workload.py --target 10.10.10.45 --src 10.10.10.46 --yes all
 
 ## Security notes
 - SSH passwords were shared in plaintext during this session — rotate them and switch to

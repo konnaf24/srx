@@ -9,10 +9,10 @@
 #   iperf3   :5201 (throughput server)
 #
 # Verified against Ubuntu 24.04. Run on the target host you OWN / are
-# AUTHORIZED to test (e.g. 84.254.1.45).
+# AUTHORIZED to test (e.g. 10.10.10.45).
 #
 # Usage:
-#     sudo BIND_IP=84.254.1.45 ./deploy/setup_target.sh
+#     sudo BIND_IP=10.10.10.45 ./deploy/setup_target.sh
 #
 set -euo pipefail
 

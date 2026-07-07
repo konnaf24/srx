@@ -6,7 +6,7 @@
 # installs Python deps + Playwright (with Ubuntu 24.04 chromium runtime libs),
 # and copies the example config. Verified against Ubuntu 24.04.
 #
-# Usage (run on the generator host, e.g. 84.254.1.46):
+# Usage (run on the generator host, e.g. 10.10.10.46):
 #     sudo ./deploy/setup_generator.sh
 #
 set -euo pipefail
