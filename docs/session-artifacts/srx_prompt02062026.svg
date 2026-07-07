@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="900" viewBox="0 0 1180 900" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#37474f"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#c62828"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2e7d32"/>
+    </marker>
+    <style>
+      .title { font-size: 26px; font-weight: 700; fill: #102027; }
+      .sub   { font-size: 14px; fill: #546e7a; }
+      .step  { font-size: 15px; font-weight: 600; fill: #ffffff; }
+      .stepn { font-size: 13px; fill: #eceff1; }
+      .lbl   { font-size: 13px; font-weight: 600; fill: #263238; }
+      .small { font-size: 12px; fill: #37474f; }
+      .host  { font-size: 15px; font-weight: 700; fill: #0d47a1; }
+      .svc   { font-size: 12.5px; fill: #1b5e20; }
+    </style>
+  </defs>
+
+  <rect width="1180" height="900" fill="#f5f7fa"/>
+  <text x="40" y="46" class="title">SRX Transit Security Detection Probe — Deployment &amp; Workload Steps</text>
+  <text x="40" y="70" class="sub">konnaf24/srx  ·  2026-07-02  ·  saved as srx_prompt02062026</text>
+
+  <!-- ======= LEFT: numbered steps ======= -->
+  <!-- Step 1 -->
+  <rect x="40" y="100" width="300" height="66" rx="10" fill="#455a64"/>
+  <text x="58" y="128" class="step">1 · Clone repo</text>
+  <text x="58" y="150" class="stepn">git clone github.com/konnaf24/srx</text>
+
+  <line x1="190" y1="166" x2="190" y2="186" stroke="#37474f" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Step 2 -->
+  <rect x="40" y="188" width="300" height="80" rx="10" fill="#455a64"/>
+  <text x="58" y="216" class="step">2 · Identify requirements</text>
+  <text x="58" y="237" class="stepn">Python venv · pip deps · playwright</text>
+  <text x="58" y="256" class="stepn">nmap hping3 wrk iperf3 tshark</text>
+
+  <line x1="190" y1="268" x2="190" y2="288" stroke="#37474f" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Step 3 -->
+  <rect x="40" y="290" width="300" height="98" rx="10" fill="#1565c0"/>
+  <text x="58" y="318" class="step">3 · Deploy to 84.254.1.46</text>
+  <text x="58" y="339" class="stepn">apt tools · venv · pip install</text>
+  <text x="58" y="358" class="stepn">playwright + chromium (t64 libs)</text>
+  <text x="58" y="377" class="stepn">pytest -m "not requires_srx" = 30 pass</text>
+
+  <line x1="190" y1="388" x2="190" y2="408" stroke="#37474f" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Step 4 -->
+  <rect x="40" y="410" width="300" height="80" rx="10" fill="#455a64"/>
+  <text x="58" y="438" class="step">4 · Clarify "tests passed"</text>
+  <text x="58" y="459" class="stepn">= offline logic only, no traffic</text>
+  <text x="58" y="478" class="stepn">generators need send/run=True</text>
+
+  <line x1="190" y1="490" x2="190" y2="510" stroke="#37474f" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Step 5 -->
+  <rect x="40" y="512" width="300" height="80" rx="10" fill="#6a1b9a"/>
+  <text x="58" y="540" class="step">5 · Safety gate</text>
+  <text x="58" y="561" class="stepn">Declined attack vs arbitrary hosts</text>
+  <text x="58" y="580" class="stepn">Only owned/authorized: 84.254.1.45</text>
+
+  <line x1="190" y1="592" x2="190" y2="612" stroke="#37474f" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Step 6 -->
+  <rect x="40" y="614" width="300" height="80" rx="10" fill="#00695c"/>
+  <text x="58" y="642" class="step">6 · Build srx_workload.py CLI</text>
+  <text x="58" y="663" class="stepn">subcommands + --target/--src/--yes</text>
+  <text x="58" y="682" class="stepn">confirm gate on aggressive ops</text>
+
+  <line x1="190" y1="694" x2="190" y2="714" stroke="#37474f" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Step 7 -->
+  <rect x="40" y="716" width="300" height="80" rx="10" fill="#1565c0"/>
+  <text x="58" y="744" class="step">7 · Set up target servers</text>
+  <text x="58" y="765" class="stepn">nginx · dnsmasq · vsftpd · iperf3</text>
+  <text x="58" y="784" class="stepn">re-run all workloads = GREEN</text>
+
+  <!-- ======= RIGHT: host + traffic diagram ======= -->
+  <!-- Generator host box -->
+  <rect x="430" y="150" width="300" height="300" rx="14" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="450" y="180" class="host">Generator host</text>
+  <text x="450" y="200" class="lbl">84.254.1.46</text>
+  <rect x="452" y="214" width="256" height="26" rx="6" fill="#ffffff" stroke="#90caf9"/>
+  <text x="462" y="232" class="small">~/srx  +  venv  +  python deps</text>
+  <rect x="452" y="246" width="256" height="26" rx="6" fill="#ffffff" stroke="#90caf9"/>
+  <text x="462" y="264" class="small">nmap · hping3 · wrk · iperf3 · tshark</text>
+  <rect x="452" y="278" width="256" height="26" rx="6" fill="#ffffff" stroke="#90caf9"/>
+  <text x="462" y="296" class="small">playwright + chromium</text>
+  <rect x="452" y="310" width="256" height="26" rx="6" fill="#fff3e0" stroke="#ffb74d"/>
+  <text x="462" y="328" class="small">srx_workload.py  (ad-hoc CLI)</text>
+  <text x="450" y="360" class="small" font-weight="700">generators:</text>
+  <text x="450" y="380" class="small">l7_client · scan_gen</text>
+  <text x="450" y="398" class="small">packet_gen · load_gen</text>
+  <text x="450" y="428" class="small" fill="#2e7d32">config/probe_config.yaml</text>
+
+  <!-- Target host box -->
+  <rect x="840" y="150" width="300" height="300" rx="14" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="860" y="180" class="host" fill="#1b5e20">Target host (owned)</text>
+  <text x="860" y="200" class="lbl">84.254.1.45</text>
+  <rect x="862" y="214" width="256" height="30" rx="6" fill="#ffffff" stroke="#a5d6a7"/>
+  <text x="872" y="234" class="svc">nginx  :80   (+ /eicar.com, index)</text>
+  <rect x="862" y="250" width="256" height="30" rx="6" fill="#ffffff" stroke="#a5d6a7"/>
+  <text x="872" y="270" class="svc">dnsmasq  :53  (public IP bind)</text>
+  <rect x="862" y="286" width="256" height="30" rx="6" fill="#ffffff" stroke="#a5d6a7"/>
+  <text x="872" y="306" class="svc">vsftpd  :21</text>
+  <rect x="862" y="322" width="256" height="30" rx="6" fill="#ffffff" stroke="#a5d6a7"/>
+  <text x="872" y="342" class="svc">iperf3 server  :5201</text>
+  <rect x="862" y="358" width="256" height="30" rx="6" fill="#ffffff" stroke="#a5d6a7"/>
+  <text x="872" y="378" class="svc">sshd  :22   ·   ufw inactive</text>
+
+  <!-- traffic arrows between hosts -->
+  <path d="M730,250 L840,250" stroke="#2e7d32" stroke-width="2.5" fill="none" marker-end="url(#arrowGreen)"/>
+  <text x="742" y="242" class="small" fill="#2e7d32" font-weight="700">benign L7 / load</text>
+  <text x="742" y="266" class="small" fill="#2e7d32">HTTP·DNS·FTP·SSH·EICAR·GTUBE·wrk·iperf3</text>
+
+  <path d="M730,340 L840,340" stroke="#c62828" stroke-width="2.5" fill="none" marker-end="url(#arrowRed)"/>
+  <text x="742" y="332" class="small" fill="#c62828" font-weight="700">aggressive</text>
+  <text x="742" y="356" class="small" fill="#c62828">nmap scan · hping3 flood · scapy malformed/frag</text>
+
+  <!-- ======= Results panel ======= -->
+  <rect x="430" y="500" width="710" height="300" rx="14" fill="#ffffff" stroke="#b0bec5" stroke-width="1.5"/>
+  <text x="450" y="530" class="lbl" font-size="17">Final workload run — 84.254.1.46 → 84.254.1.45 (all GREEN)</text>
+
+  <text x="452" y="562" class="small">✅ HTTP GET → 200</text>
+  <text x="452" y="586" class="small">✅ DNS query → answered (dnsmasq)</text>
+  <text x="452" y="610" class="small">✅ SSH / FTP handshake → banner</text>
+  <text x="452" y="634" class="small">✅ EICAR + GTUBE over HTTP → delivered</text>
+  <text x="452" y="658" class="small">✅ nmap SYN/XMAS/FIN → 21,22,53,80 open</text>
+
+  <text x="812" y="562" class="small">✅ hping3 SYN/ICMP/UDP flood → 2000 pkts each</text>
+  <text x="812" y="586" class="small">✅ scapy malformed / badcsum / ttl / frag / deny</text>
+  <text x="812" y="610" class="small">✅ wrk → 133,302 reqs · 26,563 req/s · 32 MB</text>
+  <text x="812" y="634" class="small">✅ iperf3 → 4 streams · ~3.5 Gbit/s each</text>
+
+  <line x1="452" y1="676" x2="1118" y2="676" stroke="#eceff1" stroke-width="1.5"/>
+  <text x="452" y="700" class="small" font-weight="700">Re-run:</text>
+  <text x="452" y="724" class="small" font-family="Consolas, monospace">cd ~/srx &amp;&amp; sudo ./venv/bin/python srx_workload.py \</text>
+  <text x="452" y="744" class="small" font-family="Consolas, monospace">    --target 84.254.1.45 --src 84.254.1.46 --yes all</text>
+
+  <text x="452" y="778" class="small" fill="#c62828" font-weight="700">⚠ Rotate the plaintext SSH passwords · aggressive traffic = authorized hosts only</text>
+</svg>
