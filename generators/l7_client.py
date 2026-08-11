@@ -25,6 +25,9 @@ from validation.correlator import FiveTuple, Stimulus
 # Standard, harmless test artifacts.
 EICAR = r"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 GTUBE = "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X"
+HTTP_RESPONSE_LIMIT = 1024 * 1024
+HTTP_RESPONSE_TIMEOUT_S = 10.0
+HTTP_BLOCK_STATUSES = {403, 451}
 
 
 def _local_addr_for(dst_ip: str, dst_port: int) -> tuple:
@@ -70,10 +73,16 @@ class L7Client:
             metadata={"expected_app": "HTTP"},
         )
 
-    def _raw_http(self, dst_port: int, path: str = "/", body: Optional[str] = None) -> tuple:
+    def _raw_http(
+        self,
+        dst_port: int,
+        path: str = "/",
+        body: Optional[str] = None,
+        expected_response_body: Optional[str] = None,
+    ) -> tuple:
         """Open a TCP socket, send a minimal HTTP request, return the 5-tuple ends."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(10)
+        s.settimeout(HTTP_RESPONSE_TIMEOUT_S)
         s.connect((self.dst_ip, dst_port))
         src_ip, src_port = s.getsockname()
         if body is None:
@@ -84,12 +93,46 @@ class L7Client:
                 f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
             )
         s.sendall(req.encode())
+        response = b""
+        reset_by_peer = False
+        deadline = time.monotonic() + HTTP_RESPONSE_TIMEOUT_S
         try:
-            s.recv(4096)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                s.settimeout(remaining)
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                if len(response) + len(chunk) > HTTP_RESPONSE_LIMIT:
+                    raise RuntimeError(
+                        f"HTTP response from {self.dst_ip}:{dst_port}{path} "
+                        f"exceeded {HTTP_RESPONSE_LIMIT} bytes"
+                    )
+                response += chunk
+        except ConnectionResetError:
+            reset_by_peer = True
         except socket.timeout:
             pass
         finally:
             s.close()
+        if expected_response_body is not None:
+            expected = expected_response_body.encode()
+            status = None
+            status_line = response.split(b"\r\n", 1)[0].split()
+            if len(status_line) >= 2 and status_line[1].isdigit():
+                status = int(status_line[1])
+            if (
+                expected not in response
+                and not reset_by_peer
+                and status not in HTTP_BLOCK_STATUSES
+            ):
+                raise RuntimeError(
+                    f"HTTP response from {self.dst_ip}:{dst_port}{path} "
+                    "neither contained the expected test payload nor indicated "
+                    "that security enforcement blocked it"
+                )
         return src_ip, src_port
 
     # -- row 14: EICAR over HTTP (UTM/AV) -------------------------------------
@@ -101,7 +144,11 @@ class L7Client:
         src_ip, src_port = _local_addr_for(self.dst_ip, dst_port)
         ts = time.time()
         if send:
-            src_ip, src_port = self._raw_http(dst_port, path=path)
+            src_ip, src_port = self._raw_http(
+                dst_port,
+                path=path,
+                expected_response_body=EICAR,
+            )
         return Stimulus(
             five_tuple=FiveTuple(src_ip, self.dst_ip, "TCP", src_port, dst_port),
             timestamp=ts,
@@ -163,11 +210,15 @@ class L7Client:
         src_ip, src_port = s.getsockname()
         s.send(packet)
         try:
-            s.recv(512)
-        except socket.timeout:
-            pass
+            response = s.recv(512)
         finally:
             s.close()
+        if (
+            len(response) < 12
+            or response[:2] != txn
+            or not response[2] & 0x80
+        ):
+            raise RuntimeError(f"Invalid DNS response from {dns_server}")
         return src_ip, src_port
 
     def tcp_handshake(self, dst_port: int, app: str, send: bool = True) -> Stimulus:

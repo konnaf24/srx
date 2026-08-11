@@ -33,6 +33,91 @@ def test_eicar_stimulus_descriptor():
     assert stim.metadata["expected_av_name"] == "EICAR-Test-File"
 
 
+def test_eicar_delivery_requires_test_payload_in_response(monkeypatch):
+    client = L7Client(DST)
+    call = {}
+
+    def fake_raw_http(
+        dst_port,
+        path="/",
+        body=None,
+        expected_response_body=None,
+    ):
+        call.update(
+            dst_port=dst_port,
+            path=path,
+            body=body,
+            expected_response_body=expected_response_body,
+        )
+        return "198.51.100.5", 40000
+
+    monkeypatch.setattr(client, "_raw_http", fake_raw_http)
+
+    client.deliver_eicar_http(send=True)
+
+    assert call["path"] == "/eicar.com"
+    assert call["expected_response_body"] == EICAR
+
+
+@pytest.mark.parametrize(
+    "status,accepted",
+    [
+        (403, True),
+        (451, True),
+        (404, False),
+    ],
+)
+def test_eicar_http_accepts_security_blocks_but_not_missing_files(
+    monkeypatch,
+    status,
+    accepted,
+):
+    class HttpSocket:
+        def __init__(self):
+            self.responses = [
+                f"HTTP/1.1 {status} Test\r\nContent-Length: 0\r\n\r\n".encode(),
+                b"",
+            ]
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _destination):
+            pass
+
+        def getsockname(self):
+            return "198.51.100.5", 40000
+
+        def sendall(self, _request):
+            pass
+
+        def recv(self, _size):
+            return self.responses.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "generators.l7_client.socket.socket",
+        lambda *_args: HttpSocket(),
+    )
+    client = L7Client(DST)
+
+    if accepted:
+        assert client._raw_http(
+            80,
+            path="/eicar.com",
+            expected_response_body=EICAR,
+        ) == ("198.51.100.5", 40000)
+    else:
+        with pytest.raises(RuntimeError, match="neither contained"):
+            client._raw_http(
+                80,
+                path="/eicar.com",
+                expected_response_body=EICAR,
+            )
+
+
 def test_av_event_correlates_and_names_eicar():
     client = L7Client(DST)
     stim = client.deliver_eicar_http(send=False)
