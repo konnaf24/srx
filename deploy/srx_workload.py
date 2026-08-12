@@ -91,7 +91,11 @@ def hdr(title: str) -> None:
     print("\n" + "=" * 70 + f"\n{title}\n" + "=" * 70)
 
 
-def run_cmd(cmd: list[str], timeout: int = 180) -> int:
+def run_cmd(
+    cmd: list[str],
+    timeout: int = 180,
+    success_output: str | None = None,
+) -> int:
     print("$ " + " ".join(cmd))
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -103,6 +107,8 @@ def run_cmd(cmd: list[str], timeout: int = 180) -> int:
         return 124
     out = ((p.stdout or "") + (p.stderr or "")).strip()
     print(out[:2000] or "(no output)")
+    if p.returncode != 0 and success_output and success_output in out:
+        return 0
     return p.returncode
 
 
@@ -185,7 +191,8 @@ def do_flood(a):
     return run_cmd(
         ScanGenerator.build_hping3_flood_cmd(
             a.target, a.type, a.port, count=a.count, rate_pps=a.rate
-        )
+        ),
+        success_output=f"{a.count} packets transmitted",
     )
 
 

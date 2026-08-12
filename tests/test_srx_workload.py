@@ -148,6 +148,45 @@ def test_source_ip_uses_the_route_selected_address(monkeypatch):
     assert srx_workload.resolve_source_ip("203.0.113.10") == "198.51.100.5"
 
 
+def test_run_cmd_accepts_hping_transmission_without_replies(monkeypatch):
+    monkeypatch.setattr(
+        srx_workload.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["hping3"],
+            returncode=1,
+            stdout=(
+                "--- 203.0.113.10 hping statistic ---\n"
+                "2000 packets transmitted, 0 packets received, 100% packet loss"
+            ),
+            stderr="",
+        ),
+    )
+
+    assert srx_workload.run_cmd(
+        ["hping3"],
+        success_output="2000 packets transmitted",
+    ) == 0
+
+
+def test_run_cmd_does_not_hide_other_hping_errors(monkeypatch):
+    monkeypatch.setattr(
+        srx_workload.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["hping3"],
+            returncode=1,
+            stdout="",
+            stderr="permission denied",
+        ),
+    )
+
+    assert srx_workload.run_cmd(
+        ["hping3"],
+        success_output="2000 packets transmitted",
+    ) == 1
+
+
 def test_concurrent_runner_reports_failures_without_stopping_other_workloads():
     executed = []
 
