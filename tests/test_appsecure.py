@@ -7,6 +7,7 @@ classification and app-firewall enforcement.
 
 from __future__ import annotations
 
+import socket
 import time
 
 import pytest
@@ -60,6 +61,35 @@ def test_appid_dns_correlates():
     corr = Correlator()
     verdict = corr.evaluate(stim, [ev], ground_truth=[stim.five_tuple])
     assert verdict.logged is Detection.YES
+
+
+def test_dns_timeout_is_not_reported_as_success(monkeypatch):
+    class TimeoutSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _destination):
+            pass
+
+        def getsockname(self):
+            return SRC, 53000
+
+        def send(self, _packet):
+            pass
+
+        def recv(self, _size):
+            raise socket.timeout("no response")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "generators.l7_client.socket.socket",
+        lambda *_args: TimeoutSocket(),
+    )
+
+    with pytest.raises(socket.timeout):
+        L7Client(DST)._raw_dns(DST, "probe.lab")
 
 
 # ---------------------------------------------------------------------------
