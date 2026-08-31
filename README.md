@@ -115,6 +115,9 @@ full design.
 | `collectors/pcap_capture.py` | tshark / tcpdump egress ground-truth capture wrapper. |
 | `validation/correlator.py` | Match sent stimulus (5-tuple + timestamp) against collected telemetry. |
 | `validation/assertions.py` | Helper assertions: event_present, field_complete, signature_id_match, etc. |
+| `pingapp/` | Standalone live ping + WiFi-signal monitor with 24h/7d history and a browser dashboard. Independent of the SRX suite; ships here for convenience. |
+| `srx-dashboard/` | Browser front-end that runs any workload (or all of them) from `deploy/srx_workload.py`, streams stdout live, and records every "Run All" batch into a persistent heatmap. Runs the CLI locally or SSHes into a remote client host. |
+| `scripts/` | Idempotent launchers for both dashboards (safe under `@reboot` cron plus a `*/5` watchdog) and a scoped-sudoers installer for the client host. |
 | `tests/conftest.py` | pytest fixtures: load config, start collectors, teardown; marker registration. |
 | `tests/test_session_events.py` | Session create / close / deny (scapy / curl). |
 | `tests/test_screen_events.py` | Scans, floods, fragmentation, malformed (nmap / hping3 / scapy). |
@@ -127,6 +130,8 @@ full design.
 ---
 
 ## Install
+
+### Base probe suite
 
 ```bash
 # 1. Create and activate a virtual environment
@@ -145,6 +150,31 @@ playwright install
 # 4. Ensure system binaries are present for live tests:
 #    nmap, hping3, wrk, iperf3, tshark (or tcpdump)
 ```
+
+### Optional web dashboards
+
+Both dashboards are stdlib-only (no `pip install` needed). Each has its own
+`config.env.example`:
+
+```bash
+# Ping / WiFi monitor (independent of the SRX suite)
+cp pingapp/config.env.example pingapp/config.env
+$EDITOR pingapp/config.env
+
+# SRX workload dashboard (wraps deploy/srx_workload.py)
+cp srx-dashboard/config.env.example srx-dashboard/config.env
+$EDITOR srx-dashboard/config.env
+```
+
+Run manually:
+
+```bash
+source pingapp/config.env && python3 pingapp/server.py           # :8080
+source srx-dashboard/config.env && python3 srx-dashboard/dashboard.py  # :8081
+```
+
+Or wire them up as autostart jobs (see the [Web dashboards](#web-dashboards)
+section for the cron pattern).
 
 ---
 
@@ -186,6 +216,70 @@ sudo PROBE_CONFIG=config/probe_config.yaml pytest
 Tests that require live infrastructure are marked `@pytest.mark.requires_srx`
 and are **deselected** by `-m "not requires_srx"`, so the suite can always be
 collected and the logic layer can be exercised without an SRX.
+
+---
+
+---
+
+## Web dashboards
+
+Two optional single-file Python dashboards ship in this repo:
+
+### `pingapp/` — live ping + WiFi monitor (port `8080`)
+
+Continuous default-size and do-not-fragment ICMP probes, with an optional
+remote WiFi signal probe over SSH. 24h at 1-minute resolution and 7 days at
+15-minute aggregation, persisted across restarts.
+
+```bash
+cd pingapp
+cp config.env.example config.env
+$EDITOR config.env                     # PING_TARGET, WIFI_HOST, etc.
+source config.env
+python3 server.py
+```
+
+See [`pingapp/README.md`](pingapp/README.md).
+
+### `srx-dashboard/` — browser UI for the SRX workloads (port `8081`)
+
+Every subcommand of `deploy/srx_workload.py` becomes a card with editable
+parameters; a prominent **Run All** button runs the whole suite and each
+batch is captured into a persistent pass/fail heatmap. Two deployment modes:
+
+- **Local mode** (leave `SRX_CLIENT_HOST` unset) — the dashboard runs the CLI
+  directly on the same host. Requires the same setup as running the CLI
+  manually (venv, system binaries, sudo on that host).
+- **Remote mode** (set `SRX_CLIENT_HOST=user@client`) — the dashboard sits on
+  one host (e.g. your laptop) and SSHes to the client generator host for
+  every run. Requires SSH key auth to the client and passwordless sudo
+  scoped to the probe's binaries (`scripts/install-client-sudoers.sh`
+  installs a safe rule).
+
+```bash
+cd srx-dashboard
+cp config.env.example config.env
+$EDITOR config.env                     # SRX_TARGET, SRX_SRC, optional SRX_CLIENT_HOST
+source config.env
+python3 dashboard.py
+```
+
+See [`srx-dashboard/README.md`](srx-dashboard/README.md).
+
+### Autostart
+
+The idempotent launchers in `scripts/` are safe to run repeatedly.
+Suggested crontab:
+
+```
+@reboot     /path/to/srx/scripts/pingapp-start.sh
+*/5 * * * * /path/to/srx/scripts/pingapp-start.sh
+@reboot     /path/to/srx/scripts/srx-dashboard-start.sh
+*/5 * * * * /path/to/srx/scripts/srx-dashboard-start.sh
+```
+
+`config.env` and runtime state (`state.json`, `runall-history.json`, logs)
+are gitignored; nothing operator-specific ends up in the repo.
 
 ---
 
