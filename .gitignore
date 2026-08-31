@@ -18,6 +18,20 @@ ENV/
 config/probe_config.yaml
 probe_config.yaml
 
+# Dashboards runtime state / secrets (see pingapp/ and srx-dashboard/).
+# Only the *.env.example files are tracked.
+*.env
+!*.env.example
+pingapp/state.json
+pingapp/state.json.tmp
+pingapp/server.log
+pingapp/start.log
+pingapp/dash.log
+srx-dashboard/runall-history.json
+srx-dashboard/runall-history.json.tmp
+srx-dashboard/dashboard.log
+srx-dashboard/start.log
+
 # Packet captures / ground-truth artifacts
 *.pcap
 *.pcapng
