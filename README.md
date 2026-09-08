@@ -209,13 +209,16 @@ pytest -m "not requires_srx"
 and elevated privileges for packet capture / crafting):
 
 ```bash
-# Run everything, including tests marked requires_srx:
-sudo PROBE_CONFIG=config/probe_config.yaml pytest
+# Explicitly opt in to tests that contact hardware and generate traffic:
+sudo PROBE_CONFIG=config/probe_config.yaml pytest --live-srx
 ```
 
 Tests that require live infrastructure are marked `@pytest.mark.requires_srx`
 and are **deselected** by `-m "not requires_srx"`, so the suite can always be
 collected and the logic layer can be exercised without an SRX.
+An ordinary `pytest` invocation **skips** live tests unless `--live-srx` is
+provided, even when a local probe configuration exists. Offline CI installs
+only pytest and coverage.py; it does not need packet tools or an SRX.
 
 ---
 
@@ -245,16 +248,20 @@ See [`pingapp/README.md`](pingapp/README.md).
 
 Every subcommand of `deploy/srx_workload.py` becomes a card with editable
 parameters; a prominent **Run All** button runs the whole suite and each
-batch is captured into a persistent pass/fail heatmap. Two deployment modes:
+batch is captured into a persistent execution-result heatmap. A successful
+process exit is **not** a detection-validation pass: telemetry and independent
+evidence still require validation. The dashboard binds to loopback by default;
+see its README for access restrictions and remote deployment. Two execution modes:
 
 - **Local mode** (leave `SRX_CLIENT_HOST` unset) — the dashboard runs the CLI
   directly on the same host. Requires the same setup as running the CLI
   manually (venv, system binaries, sudo on that host).
 - **Remote mode** (set `SRX_CLIENT_HOST=user@client`) — the dashboard sits on
   one host (e.g. your laptop) and SSHes to the client generator host for
-  every run. Requires SSH key auth to the client and passwordless sudo
-  scoped to the probe's binaries (`scripts/install-client-sudoers.sh`
-  installs a safe rule).
+  every run. Requires SSH key auth to the client and a separately reviewed
+  privilege policy. The legacy `scripts/install-client-sudoers.sh` grants
+  general Python interpreters root execution and is **not** a narrow security
+  boundary; do not treat it as safe for an untrusted dashboard user.
 
 ```bash
 cd srx-dashboard

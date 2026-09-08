@@ -1,8 +1,8 @@
 """Independent egress ground-truth packet capture.
 
-Wraps ``tshark`` (preferred) or ``tcpdump`` to record what *actually* crossed
-the SRX egress/transit interface. This is the independent witness used by the
-correlator to disambiguate "the SRX missed it" from "the traffic never arrived"
+Wraps ``tshark`` (preferred) or ``tcpdump`` to record traffic at a configured
+egress/transit interface. Presence supports observation at that capture point,
+not a security action; absence cannot establish non-arrival at the SRX
 (see ``docs/05-correlation-model.md``).
 
 The capture runs as a subprocess for the duration of a test, writes a pcap, and
@@ -16,6 +16,7 @@ If neither ``tshark`` nor ``tcpdump`` is on ``PATH``, a clear error is raised.
 from __future__ import annotations
 
 import os
+import ipaddress
 import shutil
 import subprocess
 import time
@@ -140,24 +141,41 @@ class PcapCapture:
         cmd = [binary, "-r", self.output_path, "-T", "fields"]
         for f in fields:
             cmd += ["-e", f]
-        cmd += ["-E", "separator=,"]
+        # One outer IPv4 tuple per packet; do not let nested IP field lists
+        # shift the CSV columns. Non-IP and IPv6-only rows are rejected below.
+        cmd += ["-E", "separator=,", "-E", "occurrence=f"]
         out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
 
         tuples: List[FiveTuple] = []
         for line in out.splitlines():
             cols = line.split(",")
-            if len(cols) < 7:
+            if len(cols) != 7:
                 continue
-            ip_src, ip_dst, ip_proto, tsp, tdp, usp, udp = cols[:7]
-            sport = tsp or usp or None
-            dport = tdp or udp or None
+            ip_src, ip_dst, ip_proto, tsp, tdp, usp, udp = (c.strip() for c in cols)
+            try:
+                ipaddress.IPv4Address(ip_src)
+                ipaddress.IPv4Address(ip_dst)
+                if not 0 <= int(ip_proto) <= 255:
+                    continue
+                ip_proto = str(int(ip_proto))
+                # Select ports from the IP protocol, not an unrelated inner
+                # transport dissected elsewhere in a tunnel/ICMP error.
+                sport, dport = (tsp, tdp) if ip_proto == "6" else (
+                    (usp, udp) if ip_proto == "17" else ("", "")
+                )
+                sport = int(sport) if sport else None
+                dport = int(dport) if dport else None
+                if any(p is not None and not 0 <= p <= 65535 for p in (sport, dport)):
+                    continue
+            except ValueError:
+                continue
             tuples.append(
                 FiveTuple(
-                    src_ip=ip_src or None,
-                    dst_ip=ip_dst or None,
-                    protocol=_PROTO_NUM.get(ip_proto, ip_proto or None),
-                    src_port=int(sport) if sport else None,
-                    dst_port=int(dport) if dport else None,
+                    src_ip=ip_src,
+                    dst_ip=ip_dst,
+                    protocol=_PROTO_NUM.get(ip_proto, ip_proto),
+                    src_port=sport,
+                    dst_port=dport,
                 )
             )
         return tuples

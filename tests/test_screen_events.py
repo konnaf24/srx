@@ -23,28 +23,22 @@ DST = "203.0.113.10"
 # ---------------------------------------------------------------------------
 # Offline logic tests
 # ---------------------------------------------------------------------------
-def test_nmap_cmd_builder_scan_types():
+def test_nmap_cmd_builder_scan_types(monkeypatch):
+    monkeypatch.setattr("generators.scan_gen.require_binary", lambda name: f"/mock/{name}")
     for scan_type, flag in [("syn", "-sS"), ("xmas", "-sX"), ("fin", "-sF")]:
-        # build_nmap_cmd requires nmap on PATH; skip the binary check by only
-        # asserting the flag mapping via the internal table when nmap missing.
-        try:
-            cmd = ScanGenerator.build_nmap_cmd(DST, scan_type, max_ports=100)
-        except FileNotFoundError:
-            from generators.scan_gen import _NMAP_SCAN_FLAGS
-
-            assert _NMAP_SCAN_FLAGS[scan_type] == flag
-            continue
-        assert flag in cmd
-        assert DST in cmd
+        cmd = ScanGenerator.build_nmap_cmd(DST, scan_type, max_ports=100)
+        assert cmd[0] == "/mock/nmap"
+        assert flag in cmd and DST in cmd
+        assert cmd[cmd.index("-p") + 1] == "1-100"
+        assert "--max-rate" in cmd and "--host-timeout" in cmd
 
 
-def test_hping3_flood_cmd_is_bounded():
-    try:
-        cmd = ScanGenerator.build_hping3_flood_cmd(DST, "syn", 80, count=2000, rate_pps=500)
-    except FileNotFoundError:
-        pytest.skip("hping3 not installed")
-    assert "-c" in cmd and "2000" in cmd  # bounded packet count
-    assert any(a.startswith("u") for a in cmd)  # paced inter-packet interval
+def test_hping3_flood_cmd_is_bounded(monkeypatch):
+    monkeypatch.setattr("generators.scan_gen.require_binary", lambda name: f"/mock/{name}")
+    cmd = ScanGenerator.build_hping3_flood_cmd(DST, "syn", 80, count=2000, rate_pps=500)
+    assert cmd[0] == "/mock/hping3"
+    assert cmd[cmd.index("-c") + 1] == "2000"
+    assert cmd[cmd.index("-i") + 1] == "u2000"
     assert "-S" in cmd
 
 
@@ -119,6 +113,10 @@ def test_live_flood(config, syslog_collector, flood_type):
 def test_live_fragmentation(config, syslog_collector):
     targets = config["targets"]
     limits = config["attack_limits"]
+    from generators.load_gen import DEFAULT_LIMITS, bounded_int
+
+    bounded_int("frag_count", limits["frag_count"], DEFAULT_LIMITS.max_fragments)
+    bounded_int("allowed_tcp_port", targets["allowed_tcp_port"], 65535)
     gen = PacketGenerator(config.get("src_ip", "0.0.0.0"), targets["primary_host"])
     stim = gen.overlapping_fragments(
         targets["allowed_tcp_port"], frag_count=limits["frag_count"], send=True

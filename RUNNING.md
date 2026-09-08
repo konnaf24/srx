@@ -123,7 +123,12 @@ Each supports `--help`, e.g.:
 
 ## 4. What "success" looks like
 
-Each workload prints either the crafted 5-tuple (`[OK] ...`) or the wrapped
+The CLI reports **execution**, not an SRX detection verdict. A zero exit code
+does not prove that the SRX detected, blocked, or logged the traffic. Preserve
+this distinction when reading dashboard heatmaps. Endpoint failures, possible
+security blocks, and validated security detections are different outcomes.
+
+Each workload prints either the crafted 5-tuple (`[EXECUTED] ...`) or the wrapped
 tool's output. A fully-served target yields, for example:
 
 ```
@@ -146,7 +151,8 @@ isn't up on the target — re-check step 1.
 
 - **This lab has no SRX in the path**, so traffic is generated but not
   correlated. With a real SRX in transit, point the collectors at it via
-  `config/probe_config.yaml` and run `sudo PROBE_CONFIG=config/probe_config.yaml pytest`.
+  `config/probe_config.yaml` and explicitly opt in with
+  `sudo PROBE_CONFIG=config/probe_config.yaml pytest --live-srx`.
 - **AppImage / FUSE** and unrelated app tooling are not needed here.
 - **`hping3`/`nmap` need root** for raw sockets; run those under `sudo`.
 - **Firewall** — ensure the target's `ufw` (or cloud security group) allows

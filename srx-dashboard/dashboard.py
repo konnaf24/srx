@@ -8,36 +8,69 @@ browser. Configure host/target via env vars (see `config.env.example`).
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import os
 import queue
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 import uuid
 import re
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 REPO = Path(__file__).resolve().parent
 PORT = int(os.environ.get("SRX_DASH_PORT", "8081"))
+BIND = os.environ.get("SRX_DASH_BIND", "127.0.0.1")
+PUBLIC_ORIGIN = os.environ.get("SRX_DASH_PUBLIC_ORIGIN", "")
+TRUST_PROXY = os.environ.get("SRX_DASH_TRUST_PROXY", "") == "1"
+MAX_BODY = 16384
+MAX_LINES = 2000
+MAX_LINE_CHARS = 4096
+QUEUE_SIZE = 256
+MAX_SUBSCRIBERS = 16
+MAX_RUNS = 30
 
-# Client (where the probe runs) and server (traffic destination). No values
-# are hard-coded; if unset the dashboard still starts but rejects runs with
-# a clear "configure SRX_CLIENT_HOST" error.
+
+def allowed_origins():
+    """Validate the operator's boundary; forwarded headers are never trusted."""
+    loopback = ipaddress.ip_address(BIND).is_loopback
+    if not loopback and not (TRUST_PROXY and PUBLIC_ORIGIN):
+        raise ValueError("nonloopback bind requires authenticated proxy boundary: "
+                         "SRX_DASH_TRUST_PROXY=1 and SRX_DASH_PUBLIC_ORIGIN")
+    if PUBLIC_ORIGIN:
+        parsed = urlparse(PUBLIC_ORIGIN)
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.path or parsed.query or parsed.fragment
+                or parsed.username or parsed.password
+                or PUBLIC_ORIGIN != f"{parsed.scheme}://{parsed.netloc}"):
+            raise ValueError("SRX_DASH_PUBLIC_ORIGIN must be an exact HTTP(S) origin")
+        if not loopback and parsed.scheme != "https":
+            raise ValueError("network proxy origin must use HTTPS")
+        return {PUBLIC_ORIGIN}
+    return {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}",
+            f"http://[::1]:{PORT}"}
+
+
+# Client (where the probe runs) and server (traffic destination).
+# An unset client selects local execution; each run still requires a target.
 CLIENT_HOST = os.environ.get("SRX_CLIENT_HOST", "")         # e.g. user@203.0.113.10
 CLIENT_REPO = os.environ.get("SRX_CLIENT_REPO", "/home/user/srx")
 DEFAULT_TARGET = os.environ.get("SRX_TARGET", "")           # server IP
 DEFAULT_SRC = os.environ.get("SRX_SRC", "")                 # client IP stamped on scapy packets
 
 HISTORY_FILE = Path(os.environ.get("SRX_HISTORY_FILE", str(REPO / "runall-history.json")))
-HISTORY_MAX = int(os.environ.get("SRX_HISTORY_MAX", "30"))
-_SUMMARY_RE = re.compile(r"^\[(OK|ERR)\] ([^:]+): rc=(-?\d+) elapsed=([\d.]+)s(?: - (.+))?$")
+HISTORY_MAX = max(1, min(100, int(os.environ.get("SRX_HISTORY_MAX", "30"))))
+_SUMMARY_RE = re.compile(
+    r"^\[(OK|ERR|SUCCEEDED|FAILED)\] ([^:]+): rc=(-?\d+) elapsed=(\d+(?:\.\d+)?)s"
+    r"(?: detection=\S+)?(?: - (.+))?$")
 
 # Workload catalog. Mirrors deploy/srx_workload.py's subparsers, adding
 # aggressive/root flags for UI labelling. `params` is (name, kind, default, choices?).
@@ -109,22 +142,19 @@ def _load_history():
         with open(HISTORY_FILE) as f:
             data = json.load(f)
         if isinstance(data, list):
-            return data
+            return data[-max(1, HISTORY_MAX):]
     except (OSError, ValueError):
         pass
     return []
 
 
 def _save_history(hist):
-    try:
-        tmp = str(HISTORY_FILE) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(hist, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, str(HISTORY_FILE))
-    except OSError:
-        pass
+    tmp = str(HISTORY_FILE) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(hist, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, str(HISTORY_FILE))
 
 
 HISTORY = _load_history()
@@ -147,7 +177,9 @@ def parse_batch_from_lines(lines):
                 "name": name.strip(),
                 "rc": int(rc),
                 "elapsed": float(elapsed),
-                "ok": status == "OK",
+                "ok": status in {"OK", "SUCCEEDED"} and int(rc) == 0,
+                "execution_status": "succeeded" if int(rc) == 0 else "failed",
+                "detection_status": "not_evaluated",
                 "error": err or "",
             })
     return results
@@ -156,8 +188,6 @@ def parse_batch_from_lines(lines):
 def record_batch(run):
     """Called when a `run all` finishes; parse output and append to history."""
     results = parse_batch_from_lines(run.lines)
-    if not results:
-        return None
     passed = sum(1 for r in results if r["ok"])
     entry = {
         "id": run.id,
@@ -165,6 +195,9 @@ def record_batch(run):
         "ended": run.ended,
         "elapsed": (run.ended or time.time()) - run.started,
         "rc": run.returncode,
+        "summary_available": bool(results),
+        "execution_status": "succeeded" if run.returncode == 0 else "failed",
+        "detection_status": "not_evaluated",
         "total": len(results),
         "passed": passed,
         "failed": len(results) - passed,
@@ -187,43 +220,87 @@ class Run:
         self.started = time.time()
         self.ended = None
         self.returncode = None
-        self.lines = []              # captured output for late subscribers
-        self.subscribers = []        # active queues for SSE
+        self.lines = deque(maxlen=MAX_LINES)
+        self.events = deque(maxlen=MAX_LINES)
+        self.sequence = 0
+        self.terminal = None
+        self.subscribers = set()
         self.lock = threading.Lock()
         self.proc = None
+        self.stop_requested = False
+        self.request_id = None
+        self.request = None
+
+    def _publish(self, kind, data):
+        # Caller holds lock. Slow subscribers reconnect and replay the ring.
+        self.sequence += 1
+        event = (self.sequence, kind, data)
+        self.events.append(event)
+        for q in list(self.subscribers):
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                self.subscribers.remove(q)
+                while True:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+                q.put_nowait(None)
+        return event
 
     def emit(self, line):
         with self.lock:
+            if self.terminal is not None:
+                return
+            line = line[:MAX_LINE_CHARS]
             self.lines.append(line)
-            dead = []
-            for q in self.subscribers:
-                try:
-                    q.put_nowait(line)
-                except queue.Full:
-                    dead.append(q)
-            for q in dead:
-                self.subscribers.remove(q)
+            self._publish("log", line)
 
     def finish(self, rc):
-        self.returncode = rc
-        self.ended = time.time()
-        batch = None
-        if self.workload == "all":
-            batch = record_batch(self)
-        payload = {"__event__": "end", "rc": rc,
-                   "elapsed": self.ended - self.started}
-        if batch:
-            payload["batch"] = {"id": batch["id"], "passed": batch["passed"],
-                                "failed": batch["failed"], "total": batch["total"]}
-        self.emit(json.dumps(payload))
-
-    def subscribe(self):
-        q = queue.Queue(maxsize=4096)
         with self.lock:
-            backlog = list(self.lines)
-            done = self.ended is not None
-            self.subscribers.append(q)
+            if self.terminal is not None:
+                return
+            self.returncode = rc
+            self.ended = time.time()
+            payload = {"rc": rc, "elapsed": self.ended - self.started}
+            try:
+                batch = record_batch(self) if self.workload == "all" else None
+                if batch:
+                    payload["batch"] = {k: batch[k] for k in
+                                        ("id", "passed", "failed", "total")}
+            except Exception:
+                payload["history_error"] = True
+            self.terminal = self._publish("end", payload)
+
+    def subscribe(self, last_id=0):
+        q = queue.Queue(maxsize=QUEUE_SIZE)
+        with self.lock:
+            if len(self.subscribers) >= MAX_SUBSCRIBERS:
+                raise ValueError("too many subscribers")
+            backlog = [e for e in self.events if e[0] > last_id]
+            if self.events and (last_id < self.events[0][0] - 1
+                                or last_id > self.sequence):
+                backlog = [(0, "reset", "Older output unavailable; showing retained tail.")]
+                backlog += list(self.events)
+            done = self.terminal is not None
+            # Always replay terminal state, even when Last-Event-ID is terminal.
+            if done and self.terminal not in backlog:
+                backlog.append(self.terminal)
+            if not done:
+                self.subscribers.add(q)
         return q, backlog, done
+
+    def unsubscribe(self, q):
+        with self.lock:
+            self.subscribers.discard(q)
+
+    def snapshot(self):
+        with self.lock:
+            return {"id": self.id, "cmd": self.cmdline, "started": self.started,
+                    "ended": self.ended, "rc": self.returncode,
+                    "request_id": self.request_id,
+                    "terminal": self.terminal[2] if self.terminal else None}
 
 
 RUNS = OrderedDict()
@@ -239,9 +316,9 @@ def make_cmd(workload, target, src, params, root_ok):
       * Local mode (no SRX_CLIENT_HOST): run the CLI on this host, using the
         sibling `deploy/srx_workload.py` at the repo root.
 
-    Root-required workloads are prefixed with `sudo -n`; the sudoers rule
-    installed by `scripts/install-client-sudoers.sh` grants exactly the
-    binaries the probe needs.
+    Root-required workloads are prefixed with `sudo -n`. The operator must
+    review the privilege boundary: the legacy installer grants unrestricted
+    Python execution and is not a narrow workload authorization policy.
     """
     remote = bool(CLIENT_HOST)
 
@@ -257,7 +334,10 @@ def make_cmd(workload, target, src, params, root_ok):
         cli = str(parent / "deploy" / "srx_workload.py")
         cwd = str(parent)
 
-    remote_argv = [py, cli, "--target", target, "--src", src, "--yes", workload]
+    remote_argv = [py, cli, "--target", target]
+    if src:
+        remote_argv += ["--src", src]
+    remote_argv += ["--yes", workload]
     for name, kind, _default, _choices in WORKLOADS[workload]["params"]:
         val = params.get(name)
         if val is None or val == "":
@@ -277,47 +357,139 @@ def make_cmd(workload, target, src, params, root_ok):
     return argv, use_sudo
 
 
-def spawn_run(workload, target, src, params, root_ok):
+class AdmissionError(ValueError):
+    pass
+
+
+def validate_request(body):
+    if not isinstance(body, dict) or set(body) - {
+            "workload", "target", "src", "params", "confirm_aggressive", "request_id"}:
+        raise ValueError("invalid request object or unknown fields")
+    wl = body.get("workload")
+    if not isinstance(wl, str) or wl not in WORKLOADS:
+        raise ValueError("unknown workload")
+    def text(value, label, limit):
+        if (not isinstance(value, str) or len(value) > limit
+                or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("invalid " + label)
+        return value.strip()
+    target = text(body.get("target"), "target", 253)
+    if not target or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:%_-]*", target):
+        raise ValueError("target must be an IP address or hostname")
+    src = text(body.get("src", ""), "src", 45)
+    if src:
+        ipaddress.ip_address(src)
+    if "confirm_aggressive" in body and type(body["confirm_aggressive"]) is not bool:
+        raise ValueError("confirm_aggressive must be boolean")
+    if WORKLOADS[wl]["aggressive"] and body.get("confirm_aggressive") is not True:
+        raise ValueError("explicit aggressive confirmation required")
+    request_id = body.get("request_id")
+    if request_id is not None and (not isinstance(request_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", request_id)):
+        raise ValueError("invalid request_id")
+    params = body.get("params", {})
+    if not isinstance(params, dict) or set(params) - {p[0] for p in WORKLOADS[wl]["params"]}:
+        raise ValueError("invalid params or unknown parameter")
+    # Mirror default CLI WorkloadLimits without importing generator dependencies.
+    limits = {"port": 65535, "max-ports": 4096, "ttl": 255,
+              "duration": 300, "count": 64 if wl == "frag" else 10000, "rate": 1000,
+              "connections": 10000, "threads": 64, "parallel": 32}
+    clean = {}
+    for name, kind, default, choices in WORKLOADS[wl]["params"]:
+        value = params.get(name, default)
+        if value == "":
+            value = default
+        if kind == "int":
+            if type(value) is not int:
+                if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,8}", value):
+                    raise ValueError(name + " must be an integer")
+                value = int(value)
+            if not 1 <= value <= limits[name]:
+                raise ValueError(name + " out of range")
+        else:
+            value = text(value, name, 2048 if name == "path" else 253)
+            if not value or (choices and value not in choices):
+                raise ValueError("invalid " + name)
+            if name == "path" and not value.startswith("/"):
+                raise ValueError("path must start with /")
+            if name == "qname" and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value):
+                raise ValueError("invalid qname")
+        clean[name] = value
+    if wl == "wrk" and clean["threads"] > clean["connections"]:
+        raise ValueError("threads must not exceed connections")
+    if wl == "flood" and clean["count"] * ((1000000 + clean["rate"] - 1) // clean["rate"]) > 300000000:
+        raise ValueError("paced flood exceeds 300 seconds")
+    return wl, target, src, clean, request_id
+
+
+def spawn_run(workload, target, src, params, root_ok, request_id=None):
     argv, use_sudo = make_cmd(workload, target, src, params, root_ok)
-    run_id = uuid.uuid4().hex[:12]
-    run = Run(run_id, " ".join(shlex.quote(a) for a in argv), use_sudo,
-              workload=workload)
+    request = (workload, target, src, params, root_ok)
     with RUNS_LOCK:
+        for existing in RUNS.values():
+            if request_id and existing.request_id == request_id:
+                if existing.request != request:
+                    raise AdmissionError("request_id already used with different arguments")
+                return existing
+        if any(r.snapshot()["ended"] is None for r in RUNS.values()):
+            raise AdmissionError("a run is already active; stop or wait for it")
+        run_id = uuid.uuid4().hex[:12]
+        run = Run(run_id, " ".join(shlex.quote(a) for a in argv), use_sudo,
+                  workload=workload)
+        run.request_id, run.request = request_id, request
         RUNS[run_id] = run
-        # Trim old finished runs, keep last 30.
-        while len(RUNS) > 30:
-            oldest = next(iter(RUNS))
-            if RUNS[oldest].ended is not None:
-                del RUNS[oldest]
-            else:
-                break
+        while len(RUNS) > MAX_RUNS:
+            RUNS.popitem(last=False)
 
     def target_thread():
+        rc = 1
+        proc = None
         try:
-            proc = subprocess.Popen(
-                argv, cwd=str(REPO), stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1,
-                preexec_fn=os.setsid)
-        except FileNotFoundError as e:
+            with run.lock:
+                if run.stop_requested:
+                    rc = -signal.SIGTERM
+                else:
+                    proc = subprocess.Popen(
+                        argv, cwd=str(REPO), stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
+                        start_new_session=True)
+                    run.proc = proc
+            if proc is not None:
+                run.emit("$ " + run.cmdline)
+                # Bounded reads also protect against output without newlines.
+                while True:
+                    line = proc.stdout.readline(MAX_LINE_CHARS)
+                    if not line:
+                        break
+                    run.emit(line.rstrip("\n"))
+                rc = proc.wait()
+        except Exception as e:
             run.emit("ERROR: %s" % e)
-            run.finish(127)
-            return
-        except PermissionError as e:
-            run.emit("ERROR: %s" % e)
-            run.finish(126)
-            return
-        run.proc = proc
-        run.emit("$ " + run.cmdline)
-        for line in proc.stdout:
-            run.emit(line.rstrip("\n"))
-        proc.wait()
-        run.finish(proc.returncode)
+            rc = 127 if isinstance(e, FileNotFoundError) else 1
+            if proc is not None and proc.poll() is None:
+                kill_run(run)
+        finally:
+            try:
+                if proc is not None and proc.stdout is not None:
+                    proc.stdout.close()
+            finally:
+                run.finish(rc)
 
-    threading.Thread(target=target_thread, daemon=True).start()
+    try:
+        threading.Thread(target=target_thread, daemon=True).start()
+    except Exception as e:
+        run.emit("ERROR starting worker: %s" % e)
+        run.finish(1)
     return run
 
 
 def kill_run(run):
+    with run.lock:
+        if run.terminal is not None:
+            return False
+        run.stop_requested = True
+        if run.proc is None:
+            return True
     if run.proc and run.proc.poll() is None:
         try:
             os.killpg(run.proc.pid, signal.SIGTERM)
@@ -380,7 +552,7 @@ PAGE = r"""<!doctype html>
               margin-right:.3rem;vertical-align:middle}
 </style></head><body>
 <h1>SRX Workload Console</h1>
-<div class="sub">Wraps <code>deploy/srx_workload.py</code> on <code id="client"></code> via SSH. Streams live output.<br>Local repo: <code id="repo"></code></div>
+<div class="sub">Wraps <code>deploy/srx_workload.py</code> on <code id="client"></code>. Streams live output.<br>Local repo: <code id="repo"></code></div>
 
 <div class="warn"><strong>⚠ Attack traffic.</strong> scan/flood/malformed workloads send hostile packets.
 Only run against hosts you own or are authorized to test. Aggressive workloads pass <code>--yes</code>.</div>
@@ -392,7 +564,7 @@ Only run against hosts you own or are authorized to test. Aggressive workloads p
 </div>
 
 <div class="runall">
- <h2>Run all 14 workloads concurrently</h2>
+ <h2>Run the complete workload suite concurrently</h2>
  <div class="duration"><label style="margin:0">duration (s)</label>
   <input id="all_duration" type="number" value="60" min="1"></div>
  <button class="runbtn" onclick="runIt('all')">Run All</button>
@@ -400,8 +572,8 @@ Only run against hosts you own or are authorized to test. Aggressive workloads p
 
 <div id="history-wrap">
  <h3>Batch history <span id="hist-count" style="color:#8b949e;font-weight:400"></span></h3>
- <p>Each column is one "Run All" invocation. Rows are workloads. Green=OK, red=ERR, grey=not run.
-    Click a column to load its full output.</p>
+ <p>Each column is one "Run All" invocation. Rows are workloads. Green=execution OK, red=execution error, grey=not run. Detection is not validated.
+    Output replay is limited to the retained tail.</p>
  <canvas id="heatmap" height="380"></canvas>
  <div class="legend">
   <span style="background:#3fb950"></span>OK (rc=0)
@@ -424,7 +596,70 @@ const cardsEl = document.getElementById('cards');
 const consoleEl = document.getElementById('console');
 const statusEl = document.getElementById('status');
 const killBtn = document.getElementById('killbtn');
-let currentRun = null, currentEs = null;
+let currentRun = null, currentEs = null, launching = false, recovering = false;
+let pendingRequest = null;
+const outputLines = [];
+let outputFrame = null;
+function appendOutput(line){
+ outputLines.push(line);
+ if(outputLines.length>2000) outputLines.shift();
+ if(outputFrame===null) outputFrame=requestAnimationFrame(() => {
+  consoleEl.textContent = outputLines.join('\n');
+  consoleEl.scrollTop = consoleEl.scrollHeight;
+  outputFrame=null;
+ });
+}
+function finished(d){
+ if(currentEs) currentEs.close();
+ currentEs = null; currentRun = null; killBtn.disabled = true;
+ statusEl.textContent = `execution finished rc=${d.rc} in ${d.elapsed.toFixed(1)}s — detection not validated`;
+ if(d.history_error) statusEl.textContent += ' — WARNING: history could not be saved';
+ if(d.batch) loadHistory();
+}
+function followRun(id){
+ if(currentEs) currentEs.close();
+ currentRun = id; killBtn.disabled = false;
+ statusEl.textContent = `running (id=${id}) — detection not validated`;
+ const es = new EventSource('/api/stream?id=' + id);
+ currentEs = es;
+ es.addEventListener('log', ev => { if(currentEs===es) appendOutput(JSON.parse(ev.data)); });
+ es.addEventListener('reset', ev => {
+  if(currentEs!==es) return;
+  outputLines.length=0; appendOutput(JSON.parse(ev.data));
+ });
+ es.addEventListener('end', ev => { if(currentEs===es) finished(JSON.parse(ev.data)); });
+ es.onopen = () => { if(currentEs===es) statusEl.textContent = `running (id=${id}) — detection not validated`; };
+ es.onerror = () => {
+  if(currentEs!==es) return;
+  statusEl.textContent = 'stream disconnected — reconnecting; checking execution state…';
+  reconcile();
+ };
+}
+async function reconcile(){
+ if(recovering) return;
+ recovering = true;
+ try{
+  const r = await fetch('/api/runs');
+  if(!r.ok) throw new Error('status unavailable');
+  const runs = await r.json();
+  const run = runs.find(r => r.id===currentRun) ||
+              runs.find(r => pendingRequest && r.request_id===pendingRequest.request_id) ||
+              runs.find(r => r.ended===null);
+  if(run){
+   pendingRequest=null;
+   if(run.terminal) finished(run.terminal);
+   else if(!currentEs) followRun(run.id);
+  }else if(currentRun){
+   if(currentEs) currentEs.close();
+   currentEs=null; currentRun=null; killBtn.disabled=true;
+   statusEl.textContent='run no longer retained — execution status unknown';
+  }
+ }catch(e){ statusEl.textContent='Cannot reach dashboard — execution status unknown; retrying.'; }
+ finally{ recovering=false; }
+}
+// Recover after refresh and use status polling as a fallback to SSE reconnect.
+reconcile();
+setInterval(() => { if(currentRun || pendingRequest) reconcile(); }, 5000);
 
 function makeCard(name, w){
  const c = document.createElement('div'); c.className='card';
@@ -445,7 +680,7 @@ function makeCard(name, w){
   <button onclick="runIt('${name}')">Run</button>`;
  cardsEl.appendChild(c);
 }
-Object.entries(WORKLOADS).forEach(([n,w])=>makeCard(n,w));
+Object.entries(WORKLOADS).filter(([n])=>n!=='all').forEach(([n,w])=>makeCard(n,w));
 
 function readParams(name){
  const out = {};
@@ -460,44 +695,43 @@ function readParams(name){
  return out;
 }
 async function runIt(name){
- if(currentEs){ statusEl.textContent = 'a run is already active — stop it first'; return; }
+ if(launching || currentRun){ statusEl.textContent = 'a run is starting or active — stop it first'; return; }
  const w = WORKLOADS[name];
- if(w.aggressive){
-  if(!confirm(`Send ${name} attack traffic to ${document.getElementById('target').value}?\n\nOnly proceed if you are authorized.`)) return;
- }
+ if(w.aggressive && !confirm(`Send ${name} attack traffic to ${document.getElementById('target').value}?\n\nOnly proceed if you are authorized.`)) return;
  const body = {workload:name, target:document.getElementById('target').value,
-               src:document.getElementById('src').value, params:readParams(name)};
- consoleEl.textContent = '';
+               src:document.getElementById('src').value, params:readParams(name),
+               confirm_aggressive:!!w.aggressive};
+ // Keep the key after an ambiguous network failure, so a retry cannot relaunch.
+ const signature = JSON.stringify(body);
+ if(pendingRequest && pendingRequest.signature!==signature){
+  statusEl.textContent='Previous launch outcome unknown — retry the same request or reload to reconcile.'; return;
+ }
+ if(!pendingRequest) pendingRequest = {signature, request_id:crypto.randomUUID()};
+ body.request_id = pendingRequest.request_id;
+ launching = true; outputLines.length=0; consoleEl.textContent = '';
  statusEl.textContent = 'starting…';
- const r = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
- const j = await r.json();
- if(!r.ok){ statusEl.textContent = 'ERROR: ' + (j.error||r.status); return; }
- currentRun = j.id;
- killBtn.disabled = false;
- statusEl.textContent = `running (id=${j.id})`;
- currentEs = new EventSource('/api/stream?id=' + j.id);
- currentEs.onmessage = ev => {
-  if(ev.data.startsWith('{"__event__":"end"')){
-   const d = JSON.parse(ev.data);
-   const cls = d.rc===0?'ok':'err';
-   let extra = '';
-   if(d.batch){ extra = ` — ${d.batch.passed}/${d.batch.total} OK, ${d.batch.failed} failed`; }
-   statusEl.innerHTML = `<span class="${cls}">finished rc=${d.rc}</span> in ${d.elapsed.toFixed(1)}s${extra}`;
-   currentEs.close(); currentEs = null; currentRun = null;
-   killBtn.disabled = true;
-   if(d.batch) loadHistory();
+ try{
+  const r = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j = await r.json();
+  if(r.status>=500) throw new Error('launch outcome unknown');
+  if(!r.ok){
+   pendingRequest=null; statusEl.textContent = 'ERROR: ' + (j.error||r.status);
+   if(r.status===409) await reconcile();
    return;
   }
-  consoleEl.textContent += ev.data + '\n';
-  consoleEl.scrollTop = consoleEl.scrollHeight;
- };
- currentEs.onerror = () => { statusEl.textContent = 'stream disconnected'; };
+  pendingRequest=null; followRun(j.id);
+ }catch(e){
+  statusEl.textContent='Launch response lost — checking state; retry uses the same request ID.';
+  await reconcile();
+ }finally{ launching=false; }
 }
 
+let cachedHistory = [];
 async function loadHistory(){
  let hist;
  try{ hist = await (await fetch('/api/history')).json(); }
  catch(e){ return; }
+ cachedHistory = hist;
  document.getElementById('hist-count').textContent =
    hist.length ? `(${hist.length} batch${hist.length===1?'':'es'})` : '(no batches yet — press Run All)';
  drawHeatmap(hist);
@@ -558,23 +792,42 @@ function drawHeatmap(hist){
  x.fillStyle = '#8b949e'; x.textAlign = 'center'; x.textBaseline = 'top';
  hist.forEach((b, ci) => {
   const cx = padL + ci*colW + colW/2;
-  x.fillText(`${b.passed}/${b.total}`, cx, padT + rows*rowH + 4);
+  x.fillText(b.summary_available===false ? 'no summary' : `${b.passed}/${b.total}`, cx, padT + rows*rowH + 4);
  });
 }
 loadHistory();
-window.addEventListener('resize', loadHistory);
+let resizeFrame = null;
+window.addEventListener('resize', () => {
+ if(resizeFrame===null) resizeFrame=requestAnimationFrame(() => {
+  drawHeatmap(cachedHistory); resizeFrame=null;
+ });
+});
 
 async function killCurrent(){
  if(!currentRun) return;
- await fetch('/api/kill?id=' + currentRun, {method:'POST'});
- statusEl.textContent = 'sent stop signal';
+ try{
+  const r = await fetch('/api/kill?id=' + currentRun, {method:'POST'});
+  const j = await r.json();
+  statusEl.textContent = r.ok ? (j.killed?'stop requested — awaiting execution exit':'no active process to stop') : 'Stop failed: '+j.error;
+ }catch(e){ statusEl.textContent='Stop response lost — execution status unknown'; }
+ await reconcile();
 }
 </script></body></html>"""
 
 
 # --------------------------------------------------------------------- server
 
+def sse_frame(event):
+    sequence, kind, data = event
+    return (f"id: {sequence}\nevent: {kind}\ndata: " + json.dumps(data)
+            + "\n\n").encode()
+
+
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(20)
+
     def log_message(self, *a):
         pass
 
@@ -585,96 +838,156 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
+    def _error(self, code, message):
+        self.close_connection = True
+        return self._send(code, json.dumps({"error": message}), "application/json")
+
+    def _authorized(self, mutation=False):
+        origins = allowed_origins()
+        hosts = {urlparse(origin).netloc for origin in origins}
+        host = self.headers.get_all("Host", [])
+        origin = self.headers.get_all("Origin", [])
+        if (len(host) != 1 or host[0] not in hosts
+                or len(origin) > 1
+                or (origin and origin[0] not in origins)
+                or (mutation and not origin)
+                or self.headers.get("Sec-Fetch-Site") == "cross-site"):
+            self._error(403, "Host/Origin not allowed; same-origin requests required")
+            return False
+        # When multiple local origins are allowed, still require an exact pair.
+        if origin and urlparse(origin[0]).netloc != host[0]:
+            self._error(403, "Origin and Host must match")
+            return False
+        return True
+
+    def _run(self, query):
+        rid = parse_qs(query).get("id", [""])[0]
+        with RUNS_LOCK:
+            return RUNS.get(rid)
+
     def do_GET(self):
+        if not self._authorized():
+            return
         p = urlparse(self.path)
         if p.path in ("/", "/index.html"):
             page = (PAGE
                     .replace("__TARGET__", html.escape(DEFAULT_TARGET))
                     .replace("__SRC__", html.escape(DEFAULT_SRC))
-                    .replace("__REPO__", json.dumps(str(REPO)))
-                    .replace("__CLIENT__", json.dumps(CLIENT_HOST))
+                    .replace("__REPO__", json.dumps(str(REPO)).replace("<", "\\u003c"))
+                    .replace("__CLIENT__", json.dumps(CLIENT_HOST or "local host").replace("<", "\\u003c"))
                     .replace("__CATALOG__", json.dumps({k: {
                         "desc": v["desc"], "root": v["root"],
                         "aggressive": v["aggressive"], "params": v["params"],
                     } for k, v in WORKLOADS.items()})))
             return self._send(200, page, "text/html; charset=utf-8")
         if p.path == "/api/stream":
-            rid = parse_qs(p.query).get("id", [""])[0]
-            run = RUNS.get(rid)
+            run = self._run(p.query)
             if not run:
-                return self._send(404, "unknown run")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            q, backlog, done = run.subscribe()
+                return self._error(404, "unknown run")
             try:
-                for line in backlog:
-                    self.wfile.write(b"data: " + line.encode() + b"\n\n")
+                value = self.headers.get("Last-Event-ID", "0")
+                if not re.fullmatch(r"[0-9]{1,16}", value):
+                    raise ValueError("invalid Last-Event-ID")
+                q, backlog, done = run.subscribe(int(value))
+            except ValueError as e:
+                return self._error(400, str(e))
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                self.wfile.write(b"retry: 2000\n\n")
+                for event in backlog:
+                    self.wfile.write(sse_frame(event))
                 self.wfile.flush()
                 if done:
                     return
                 while True:
                     try:
-                        line = q.get(timeout=15)
+                        event = q.get(timeout=15)
                     except queue.Empty:
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
                         continue
-                    self.wfile.write(b"data: " + line.encode() + b"\n\n")
+                    if event is None:
+                        return  # slow consumer: reconnect with Last-Event-ID
+                    self.wfile.write(sse_frame(event))
                     self.wfile.flush()
-                    if line.startswith('{"__event__":"end"'):
+                    if event[1] == "end":
                         return
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError:
                 return
+            finally:
+                run.unsubscribe(q)
+                self.close_connection = True
         if p.path == "/api/history":
             with _hist_lock:
                 data = list(HISTORY)
             return self._send(200, json.dumps(data), "application/json")
         if p.path == "/api/runs":
-            data = [{"id": r.id, "cmd": r.cmdline, "started": r.started,
-                     "ended": r.ended, "rc": r.returncode} for r in RUNS.values()]
+            with RUNS_LOCK:
+                data = [r.snapshot() for r in RUNS.values()]
             return self._send(200, json.dumps(data), "application/json")
-        return self._send(404, "not found")
+        return self._error(404, "not found")
 
     def do_POST(self):
+        if not self._authorized(mutation=True):
+            return
         p = urlparse(self.path)
+        if self.headers.get("Transfer-Encoding"):
+            return self._error(400, "Transfer-Encoding is not supported")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,8}", lengths[0]):
+            return self._error(400, "valid Content-Length required")
+        length = int(lengths[0])
+        if length > MAX_BODY:
+            return self._error(413, "request too large")
         if p.path == "/api/run":
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
-            wl = body.get("workload")
-            if wl not in WORKLOADS:
-                return self._send(400, json.dumps({"error": "unknown workload"}),
-                                  "application/json")
-            # Remote client mode requires SRX_CLIENT_HOST; local mode is fine.
-            target = (body.get("target") or "").strip()
-            src = (body.get("src") or "").strip()
-            if not target:
-                return self._send(400, json.dumps({"error": "target required"}),
-                                  "application/json")
-            run = spawn_run(wl, target, src, body.get("params") or {}, root_ok=True)
+            if self.headers.get_content_type() != "application/json":
+                return self._error(415, "application/json required")
+            try:
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    raise ValueError("incomplete request body")
+                body = json.loads(raw)
+                wl, target, src, params, request_id = validate_request(body)
+            except (ValueError, UnicodeError, RecursionError, OSError) as e:
+                return self._error(400, "invalid request: " + str(e))
+            try:
+                run = spawn_run(wl, target, src, params, root_ok=True,
+                                request_id=request_id)
+            except AdmissionError as e:
+                return self._error(409, str(e))
             return self._send(200, json.dumps({"id": run.id, "cmd": run.cmdline}),
                               "application/json")
         if p.path == "/api/kill":
-            rid = parse_qs(p.query).get("id", [""])[0]
-            run = RUNS.get(rid)
+            if length:
+                return self._error(400, "kill request must have an empty body")
+            run = self._run(p.query)
             if not run:
-                return self._send(404, json.dumps({"error": "unknown run"}),
-                                  "application/json")
+                return self._error(404, "unknown run")
             killed = kill_run(run)
             return self._send(200, json.dumps({"killed": killed}),
                               "application/json")
-        return self._send(404, "not found")
+        return self._error(404, "not found")
+
+
+def main():
+    allowed_origins()  # Fail closed before opening a socket.
+    print(f"SRX workload dashboard bind={BIND}:{PORT}")
+    print(f"repo: {REPO}")
+    class Server(ThreadingHTTPServer):
+        address_family = socket.AF_INET6 if ":" in BIND else socket.AF_INET
+    Server((BIND, PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
-    print(f"SRX workload dashboard on http://0.0.0.0:{PORT}")
-    print(f"repo: {REPO}")
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    main()
