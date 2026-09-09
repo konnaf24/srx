@@ -30,7 +30,8 @@ import subprocess
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
+from functools import wraps
 from pathlib import Path
 from threading import Event
 from typing import Callable
@@ -44,7 +45,7 @@ try:
     from generators.l7_client import L7Client
     from generators.scan_gen import ScanGenerator
     from generators.packet_gen import PacketGenerator
-    from generators.load_gen import LoadGenerator
+    from generators.load_gen import LoadGenerator, WorkloadLimits, DEFAULT_LIMITS, bounded_int
 except ImportError as exc:  # pragma: no cover
     sys.exit(
         f"Cannot import generators ({exc}).\n"
@@ -63,6 +64,58 @@ def positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return parsed
+
+
+def _limits(a: argparse.Namespace) -> WorkloadLimits:
+    return getattr(a, "limits", DEFAULT_LIMITS)
+
+
+def validate_args(a: argparse.Namespace, command: str | None = None) -> None:
+    """Validate all numeric controls before routing, prompting or sending."""
+    limits = _limits(a)
+    command = command or a.cmd
+    if hasattr(a, "port"):
+        bounded_int("port", a.port, 65535, 0 if command == "flood" and a.type == "icmp" else 1)
+    if command == "all":
+        bounded_int("duration", a.duration, limits.max_duration_s)
+    elif command == "scan":
+        limits.scan(a.max_ports)
+    elif command == "flood":
+        limits.flood(a.type, a.port, a.count, a.rate)
+    elif command == "frag":
+        bounded_int("fragment count", a.count, limits.max_fragments)
+    elif command == "ttl":
+        bounded_int("ttl", a.ttl, 255)
+    elif command == "wrk":
+        limits.wrk(a.connections, a.threads, a.duration)
+        LoadGenerator._http_port(a.url or f"http://{a.target}/")
+    elif command == "iperf":
+        limits.iperf(a.duration, a.parallel, a.port)
+
+
+def validated(func):
+    """Also guard callers that bypass argparse and invoke a sender directly."""
+    @wraps(func)
+    def wrapped(a):
+        validate_args(a, func.__name__.removeprefix("do_"))
+        return func(a)
+    return wrapped
+
+
+class WorkloadParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        try:
+            parsed.limits = WorkloadLimits(**{
+                field.name: getattr(parsed, f"limit_{field.name}")
+                for field in fields(WorkloadLimits)
+            })
+            validate_args(parsed)
+            if parsed.cmd == "all":
+                build_all_workloads(parsed)
+        except ValueError as exc:
+            self.error(str(exc))
+        return parsed
 
 
 def resolve_source_ip(target: str) -> str:
@@ -85,6 +138,22 @@ class WorkloadResult:
     returncode: int
     elapsed_s: float
     error: str = ""
+    detection_status: str = "not_evaluated"
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def execution_status(self) -> str:
+        return "succeeded" if self.returncode == 0 else "failed"
+
+
+class CommandResult(int):
+    """An int-compatible exit code retaining captured execution diagnostics."""
+    def __new__(cls, returncode: int, *, error: str = "", output: str = "", metadata=None):
+        result = super().__new__(cls, returncode)
+        result.error = error
+        result.output = output
+        result.metadata = metadata or {}
+        return result
 
 
 def hdr(title: str) -> None:
@@ -99,27 +168,34 @@ def run_cmd(
     print("$ " + " ".join(cmd))
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         print("  [ERR] binary not found on PATH")
-        return 127
-    except subprocess.TimeoutExpired:
+        return CommandResult(127, error=f"binary not found on PATH: {exc}")
+    except subprocess.TimeoutExpired as exc:
         print("  [ERR] timed out")
-        return 124
+        return CommandResult(124, error=f"timed out after {timeout}s; stdout={exc.stdout!r}; stderr={exc.stderr!r}")
     out = ((p.stdout or "") + (p.stderr or "")).strip()
     print(out[:2000] or "(no output)")
-    if p.returncode != 0 and success_output and success_output in out:
-        return 0
-    return p.returncode
+    # success_output is retained for caller compatibility, never an exit override.
+    return CommandResult(
+        p.returncode, error=out if p.returncode else "", output=out,
+        metadata={"stdout": p.stdout, "stderr": p.stderr, "returncode": p.returncode,
+                  "execution_status": "succeeded" if p.returncode == 0 else "failed",
+                  "detection_status": "not_evaluated"},
+    )
 
 
 def emit(label: str, fn) -> int:
     """Call a generator method that returns a Stimulus, report the 5-tuple."""
     stimulus = fn()
     print(
-        f"  [OK] {label}: 5-tuple={stimulus.five_tuple} "
-        f"expect={stimulus.expected_event_type}"
+        f"  [EXECUTED] {label}: 5-tuple={stimulus.five_tuple} "
+        f"expect={stimulus.expected_event_type}; detection=not_evaluated"
     )
-    return 0
+    if "result" in stimulus.metadata:
+        measurements = {key: value for key, value in stimulus.metadata["result"].items() if key != "raw"}
+        print(f"  measurements={measurements}")
+    return CommandResult(0, metadata=stimulus.metadata)
 
 
 def confirm(cmd_name: str, target: str, assume_yes: bool) -> None:
@@ -134,6 +210,7 @@ def confirm(cmd_name: str, target: str, assume_yes: bool) -> None:
 
 
 # --------------------------- workload implementations ---------------------------
+@validated
 def do_http(a):
     hdr("HTTP GET (l7_client)")
     l7 = L7Client(a.target)
@@ -143,6 +220,7 @@ def do_http(a):
     )
 
 
+@validated
 def do_dns(a):
     hdr("DNS query (l7_client)")
     l7 = L7Client(a.target)
@@ -152,6 +230,7 @@ def do_dns(a):
     )
 
 
+@validated
 def do_handshake(a):
     hdr(f"TCP handshake :{a.port} (l7_client)")
     l7 = L7Client(a.target)
@@ -161,6 +240,7 @@ def do_handshake(a):
     )
 
 
+@validated
 def do_eicar(a):
     hdr("EICAR over HTTP (l7_client)")
     l7 = L7Client(a.target)
@@ -170,6 +250,7 @@ def do_eicar(a):
     )
 
 
+@validated
 def do_gtube(a):
     hdr("GTUBE over HTTP (l7_client)")
     l7 = L7Client(a.target)
@@ -179,23 +260,27 @@ def do_gtube(a):
     )
 
 
+@validated
 def do_scan(a):
     hdr(f"nmap {a.type} scan (scan_gen)")
     return run_cmd(
-        ScanGenerator.build_nmap_cmd(a.target, a.type, max_ports=a.max_ports)
+        ScanGenerator.build_nmap_cmd(a.target, a.type, max_ports=a.max_ports, limits=_limits(a)),
+        timeout=_limits(a).max_duration_s + 30,
     )
 
 
+@validated
 def do_flood(a):
     hdr(f"hping3 {a.type} flood — {a.count} pkts @ {a.rate}pps (scan_gen)")
     return run_cmd(
         ScanGenerator.build_hping3_flood_cmd(
-            a.target, a.type, a.port, count=a.count, rate_pps=a.rate
+            a.target, a.type, a.port, count=a.count, rate_pps=a.rate, limits=_limits(a)
         ),
-        success_output=f"{a.count} packets transmitted",
+        timeout=_limits(a).max_duration_s + 30,
     )
 
 
+@validated
 def do_malformed(a):
     hdr("Malformed SYN+FIN (packet_gen/scapy)")
     return emit(
@@ -204,6 +289,7 @@ def do_malformed(a):
     )
 
 
+@validated
 def do_badcsum(a):
     hdr("Bad checksum (packet_gen/scapy)")
     return emit(
@@ -212,6 +298,7 @@ def do_badcsum(a):
     )
 
 
+@validated
 def do_ttl(a):
     hdr(f"Tiny TTL={a.ttl} (packet_gen/scapy)")
     return emit(
@@ -222,6 +309,7 @@ def do_ttl(a):
     )
 
 
+@validated
 def do_frag(a):
     hdr(f"Overlapping fragments x{a.count} (packet_gen/scapy)")
     return emit(
@@ -232,6 +320,7 @@ def do_frag(a):
     )
 
 
+@validated
 def do_deny(a):
     hdr(f"SYN to denied port :{a.port} (packet_gen/scapy)")
     return emit(
@@ -242,20 +331,20 @@ def do_deny(a):
     )
 
 
+@validated
 def do_wrk(a):
     hdr(f"wrk load — {a.connections} conns / {a.threads} thr / {a.duration}s (load_gen)")
-    return run_cmd(
-        LoadGenerator.build_wrk_cmd(a.url or f"http://{a.target}/", a.connections, a.threads, a.duration),
-        timeout=a.duration + 30,
-    )
+    return emit("wrk", lambda: LoadGenerator(a.target, limits=_limits(a)).session_volume(
+        a.url or f"http://{a.target}/", a.connections, a.threads, a.duration, run=True,
+    ))
 
 
+@validated
 def do_iperf(a):
     hdr(f"iperf3 -> {a.target}:{a.port} for {a.duration}s (load_gen)")
-    return run_cmd(
-        LoadGenerator.build_iperf3_cmd(a.target, a.duration, a.parallel, a.port),
-        timeout=a.duration + 30,
-    )
+    return emit("iperf3", lambda: LoadGenerator(a.target, limits=_limits(a)).throughput(
+        duration_s=a.duration, parallel=a.parallel, port=a.port, run=True,
+    ))
 
 
 def _args(a: argparse.Namespace, **overrides) -> argparse.Namespace:
@@ -318,24 +407,53 @@ def build_all_workloads(a: argparse.Namespace) -> list[Workload]:
             ),
         ]
     )
+    bounded_int("concurrent workloads", len(workloads), _limits(a).max_workloads)
+    for workload in workloads:
+        validate_args(workload.args, workload.func.__name__.removeprefix("do_"))
     return workloads
 
 
 def _run_workload(workload: Workload) -> WorkloadResult:
     start = time.monotonic()
-    returncode = workload.func(workload.args)
+    error = ""
+    metadata = {}
+    try:
+        returncode = workload.func(workload.args)
+        if not isinstance(returncode, int) or isinstance(returncode, bool):
+            raise TypeError("workload must return an integer exit code")
+        metadata = getattr(returncode, "metadata", {})
+        error = getattr(returncode, "error", "")
+        if returncode != 0 and not error:
+            error = f"process exited with status {returncode}"
+    except Exception as exc:
+        returncode = 1
+        if isinstance(exc, subprocess.CalledProcessError):
+            returncode = exc.returncode
+        elif isinstance(exc, subprocess.TimeoutExpired):
+            returncode = 124
+        elif isinstance(exc, FileNotFoundError):
+            returncode = 127
+        error = f"{type(exc).__name__}: {exc}"
+        if isinstance(exc, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+            error += f"; stdout={exc.stdout!r}; stderr={exc.stderr!r}"
     return WorkloadResult(
-        name=workload.name,
-        returncode=returncode,
-        elapsed_s=time.monotonic() - start,
+        name=workload.name, returncode=int(returncode),
+        elapsed_s=time.monotonic() - start, error=error, metadata=metadata,
     )
 
 
-def run_concurrently(workloads: list[Workload]) -> list[WorkloadResult]:
+def run_concurrently(
+    workloads: list[Workload], *, limits: WorkloadLimits = DEFAULT_LIMITS,
+) -> list[WorkloadResult]:
     """Start every workload concurrently and collect every result."""
     if not workloads:
         return []
 
+    bounded_int("concurrent workloads", len(workloads), limits.max_workloads)
+    # Fail the whole preflight before submitting any sender, not halfway through.
+    for workload in workloads:
+        if workload.func.__name__.startswith("do_"):
+            validate_args(workload.args, workload.func.__name__.removeprefix("do_"))
     start_gate = Event()
 
     def run_after_release(workload: Workload) -> WorkloadResult:
@@ -353,43 +471,33 @@ def run_concurrently(workloads: list[Workload]) -> list[WorkloadResult]:
         }
         start_gate.set()
         for future in as_completed(futures):
-            workload = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as exc:
-                results.append(
-                    WorkloadResult(
-                        name=workload.name,
-                        returncode=1,
-                        elapsed_s=0.0,
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-                )
+            results.append(future.result())
     return results
 
 
+@validated
 def do_all(a):
     workloads = build_all_workloads(a)
     hdr(
         f"STARTING {len(workloads)} CONCURRENT WORKLOADS "
         f"({a.duration}s sustained duration)"
     )
-    results = run_concurrently(workloads)
+    results = run_concurrently(workloads, limits=_limits(a))
     failures = [result for result in results if result.returncode != 0]
 
     hdr("WORKLOAD SUMMARY")
     for result in sorted(results, key=lambda item: item.name):
-        status = "OK" if result.returncode == 0 else "ERR"
+        status = result.execution_status.upper()
         detail = f" - {result.error}" if result.error else ""
         print(
             f"[{status}] {result.name}: rc={result.returncode} "
-            f"elapsed={result.elapsed_s:.1f}s{detail}"
+            f"elapsed={result.elapsed_s:.1f}s detection={result.detection_status}{detail}"
         )
     return 1 if failures else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = WorkloadParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--target", required=True, help="Destination IP/host (must be yours/authorized)")
     p.add_argument(
         "--src",
@@ -397,6 +505,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Source IP for crafted packets (default: address routed to target)",
     )
     p.add_argument("--yes", action="store_true", help="Skip the aggressive-workload confirmation prompt")
+    for field in fields(WorkloadLimits):
+        p.add_argument(
+            "--limit-" + field.name.removeprefix("max_").replace("_", "-"),
+            dest=f"limit_{field.name}", type=positive_int,
+            default=getattr(DEFAULT_LIMITS, field.name),
+            help=f"Authorized-lab ceiling for {field.name} (default: %(default)s)",
+        )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser(
@@ -479,10 +594,11 @@ def main(argv=None) -> int:
                 "pass --src explicitly"
             )
     confirm(args.cmd, args.target, args.yes)
-    start = time.time()
-    returncode = args.func(args)
-    hdr(f"DONE in {time.time() - start:.1f}s")
-    return returncode
+    result = _run_workload(Workload(args.cmd, args.func, args))
+    hdr(f"DONE in {result.elapsed_s:.1f}s; execution={result.execution_status}; detection=not_evaluated")
+    if result.error:
+        print(f"[ERR] {result.error}")
+    return result.returncode
 
 
 if __name__ == "__main__":

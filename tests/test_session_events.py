@@ -110,7 +110,8 @@ def test_inconclusive_when_no_ground_truth_and_no_log():
     corr = Correlator()
     verdict = corr.evaluate(stim, [], ground_truth=[])  # ground truth says not seen
     assert verdict.logged is Detection.INCONCLUSIVE
-    assert "never crossed" in verdict.note
+    assert verdict.detected is Detection.INCONCLUSIVE
+    assert "Absence does not establish non-arrival" in verdict.note
 
 
 def test_syslog_parser_extracts_rt_flow_five_tuple():

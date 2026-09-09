@@ -31,16 +31,28 @@ import re
 import socket
 import threading
 import time
+from collections import deque
 from typing import Dict, List, Optional
 
 from validation.correlator import FiveTuple, TelemetryEvent
 
 # Matches key="value" or key=value structured-data pairs.
-_KV_RE = re.compile(r'([A-Za-z0-9_\-\.]+)="([^"]*)"|([A-Za-z0-9_\-\.]+)=(\S+)')
+_KEY = r'[A-Za-z0-9_\-\.]+'
+_QUOTED = r'"(?:\\.|[^"\\])*"'
+_SD_QUOTED = r'"(?:\\.|[^"\\\]])*"'
+_KV_RE = re.compile(rf'({_KEY})=({_QUOTED})|({_KEY})=([^\s\]"]+)')
+_SD_RE = re.compile(rf'\[[^\s\]"=]+(?:\s+{_KEY}={_SD_QUOTED})*\]')
+_HEADER_RE = re.compile(
+    r'^<\d{1,3}>[1-9]\d*\s+\S+\s+\S+\s+\S+\s+\S+\s+'
+    r'(?P<msgid>\S+)\s+(?P<body>.*)$'
+)
 
 # Matches the Junos event tag (e.g. RT_FLOW_SESSION_CREATE, RT_IDP_ATTACK_LOG_EVENT,
 # APPTRACK_SESSION_CREATE, WEBFILTER_URL_BLOCKED, AV_VIRUS_DETECTED_MT).
 _TAG_RE = re.compile(r'\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b')
+_LEGACY_TAG_RE = re.compile(
+    r'(?<!\S)((?:RT_[A-Z0-9]+_|APPTRACK_|WEBFILTER_|AV_)[A-Z0-9_]+)(?=[:\s]|$)'
+)
 
 # Maps Junos sd-syslog field names to 5-tuple components. Multiple aliases are
 # accepted because field names vary slightly across features/Junos versions.
@@ -71,7 +83,12 @@ def _to_int(val: Optional[str]) -> Optional[int]:
 def parse_syslog_line(line: str, recv_time: Optional[float] = None) -> Optional[TelemetryEvent]:
     """Parse a single structured Junos sd-syslog line into a TelemetryEvent.
 
-    Returns ``None`` if no recognizable Junos event tag is present.
+    RFC5424 MSGID is authoritative; structured fields are read only from SD
+    elements, not the free-text message. RFC5424 escapes for quotes, backslashes
+    and closing brackets are decoded; unknown escapes are preserved literally.
+    Legacy lines use the first known event-family tag before structured data or
+    key/value fields, never an uppercase field value. Malformed structured
+    headers/data and absent or unrecognizable tags return ``None``.
     ``recv_time`` (epoch seconds) defaults to "now"; it is used as the event
     timestamp so correlation does not depend on parsing the textual syslog
     timestamp (clock skew is handled by the correlator window).
@@ -83,21 +100,43 @@ def parse_syslog_line(line: str, recv_time: Optional[float] = None) -> Optional[
     if not line:
         return None
 
-    # Extract key="value" / key=value structured pairs.
+    header = _HEADER_RE.match(line)
+    if header is not None:
+        event_type = header.group("msgid")
+        if _TAG_RE.fullmatch(event_type) is None:
+            return None
+        body = header.group("body")
+        chunks = []
+        pos = 0
+        if body == "-" or body.startswith("- "):
+            field_text = ""
+        else:
+            while pos < len(body) and body[pos] == "[":
+                sd = _SD_RE.match(body, pos)
+                if sd is None:
+                    return None
+                chunks.append(sd.group())
+                pos = sd.end()
+            if not chunks or (pos < len(body) and body[pos] != " "):
+                return None
+            field_text = " ".join(chunks)
+    else:
+        # Do not reinterpret a broken RFC5424 record as a legacy record.
+        if re.match(r'^<\d+>\d+\s', line):
+            return None
+        preamble = line.split("[", 1)[0].split("=", 1)[0]
+        tag = _LEGACY_TAG_RE.search(preamble)
+        if tag is None:
+            return None
+        event_type = tag.group(1)
+        field_text = line[tag.end():]
+
     fields: Dict[str, str] = {}
-    for m in _KV_RE.finditer(line):
+    for m in _KV_RE.finditer(field_text):
         if m.group(1) is not None:
-            fields[m.group(1)] = m.group(2)
+            fields[m.group(1)] = re.sub(r'\\(["\\\]])', r'\1', m.group(2)[1:-1])
         else:
             fields[m.group(3)] = m.group(4)
-
-    # Identify the event tag. Prefer the longest match (most specific).
-    tags = _TAG_RE.findall(line)
-    # Drop the structured-data SD-ID vendor token if present (e.g. "junos").
-    tags = [t for t in tags if not t.startswith("SD")]
-    if not tags:
-        return None
-    event_type = max(tags, key=len)
 
     proto_raw = _first(fields, _PROTO_KEYS)
     protocol = _PROTO_NUM.get(proto_raw, proto_raw.upper() if isinstance(proto_raw, str) else None)
@@ -143,8 +182,11 @@ class SyslogCollector:
         self.bind_port = int(bind_port)
         self.protocol = protocol.lower()
         self.max_events = int(max_events)
+        if self.max_events <= 0:
+            raise ValueError("max_events must be positive")
 
-        self._events: List[TelemetryEvent] = []
+        self._events = deque(maxlen=self.max_events)
+        self._dropped_events = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -244,10 +286,15 @@ class SyslogCollector:
     def add_event(self, event: TelemetryEvent) -> None:
         """Append a parsed event (used by the receive loop and by tests)."""
         with self._lock:
+            if len(self._events) == self._events.maxlen:
+                self._dropped_events += 1
             self._events.append(event)
-            if len(self._events) > self.max_events:
-                # Drop oldest to bound memory.
-                del self._events[: len(self._events) - self.max_events]
+
+    @property
+    def dropped_events(self) -> int:
+        """Lifetime count of events evicted by the buffer cap (not clear())."""
+        with self._lock:
+            return self._dropped_events
 
     def clear(self) -> None:
         with self._lock:
@@ -266,7 +313,7 @@ class SyslogCollector:
         end_time: Optional[float] = None,
     ) -> List[TelemetryEvent]:
         """Return buffered events filtered by type / 5-tuple / time window."""
-        from validation.correlator import five_tuple_matches  # local import to avoid cycle
+        from validation.correlator import observation_matches
 
         with self._lock:
             events = list(self._events)
@@ -275,7 +322,7 @@ class SyslogCollector:
         for ev in events:
             if event_type is not None and ev.event_type != event_type:
                 continue
-            if five_tuple is not None and not five_tuple_matches(five_tuple, ev.five_tuple):
+            if five_tuple is not None and not observation_matches(five_tuple, ev.five_tuple):
                 continue
             if start_time is not None and ev.timestamp < start_time:
                 continue

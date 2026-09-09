@@ -148,7 +148,7 @@ def test_source_ip_uses_the_route_selected_address(monkeypatch):
     assert srx_workload.resolve_source_ip("203.0.113.10") == "198.51.100.5"
 
 
-def test_run_cmd_accepts_hping_transmission_without_replies(monkeypatch):
+def test_run_cmd_retains_nonzero_exit_even_with_transmission_summary(monkeypatch):
     monkeypatch.setattr(
         srx_workload.subprocess,
         "run",
@@ -166,7 +166,7 @@ def test_run_cmd_accepts_hping_transmission_without_replies(monkeypatch):
     assert srx_workload.run_cmd(
         ["hping3"],
         success_output="2000 packets transmitted",
-    ) == 0
+    ) == 1
 
 
 def test_run_cmd_does_not_hide_other_hping_errors(monkeypatch):
@@ -218,3 +218,7 @@ def test_concurrent_runner_reports_failures_without_stopping_other_workloads():
     assert results["unsuccessful"].returncode == 7
     assert results["crashing"].returncode == 1
     assert results["crashing"].error == "RuntimeError: boom"
+    assert results["crashing"].elapsed_s > 0
+    assert results["successful"].execution_status == "succeeded"
+    assert results["unsuccessful"].error == "process exited with status 7"
+    assert all(result.detection_status == "not_evaluated" for result in results.values())

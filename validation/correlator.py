@@ -2,8 +2,8 @@
 
 Implements the correlation contract described in ``docs/05-correlation-model.md``:
 
-    "I sent exactly this 5-tuple + payload at this timestamp; did the SRX log
-     exactly that with complete fields?"
+    "Does the SRX telemetry match this stimulus descriptor and time window,
+     with complete fields and clearly identified observation evidence?"
 
 Everything here is pure Python with no external dependencies, so the matching
 logic can be unit-tested offline without a live SRX, collectors, or generators.
@@ -20,6 +20,8 @@ Core concepts
 from __future__ import annotations
 
 import enum
+import ipaddress
+import math
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence
 
@@ -56,7 +58,8 @@ class Stimulus:
     Attributes
     ----------
     five_tuple:
-        The exact 5-tuple of the traffic generated.
+        Known tuple constraints of the traffic generated; aggregate stimuli
+        may leave fields as wildcards.
     timestamp:
         Epoch seconds (float) at which the stimulus was sent.
     expected_event_type:
@@ -124,6 +127,25 @@ def five_tuple_matches(a: FiveTuple, b: FiveTuple) -> bool:
     )
 
 
+def observation_matches(stimulus: FiveTuple, observed: FiveTuple) -> bool:
+    """Match compatible tuples only when the observation has an IP endpoint.
+
+    Stimuli may describe aggregates (including wildcard addresses/ports).
+    Observations must contain at least one valid IP address; any supplied
+    address must be valid. Missing ports remain legitimate for aggregate logs,
+    fragments and protocols without ports. This is not exact flow attribution.
+    """
+    addresses = [ip for ip in (observed.src_ip, observed.dst_ip) if ip is not None]
+    if not addresses:
+        return False
+    try:
+        for address in addresses:
+            ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return five_tuple_matches(stimulus, observed)
+
+
 def within_window(
     stimulus_time: float,
     event_time: float,
@@ -135,7 +157,10 @@ def within_window(
     The window is ``[stimulus_time - skew_s, stimulus_time + window_s + skew_s]``.
     ``skew_s`` absorbs bounded clock skew between generator, SRX, and collector;
     ``window_s`` absorbs SRX processing / session-close latency.
+    Non-finite timestamps cannot establish a bounded-time match.
     """
+    if not math.isfinite(stimulus_time) or not math.isfinite(event_time):
+        return False
     lower = stimulus_time - skew_s
     upper = stimulus_time + window_s + skew_s
     return lower <= event_time <= upper
@@ -158,7 +183,7 @@ class Verdict:
 
     detection_target: str
     event_type: str
-    detected: Detection           # did the SRX actually see/act on the stimulus?
+    detected: Detection           # legacy observation/inference flag, not proof of action
     logged: Detection             # did a correlating telemetry event appear?
     fields_complete: Detection    # did the correlated event carry all fields?
     matched_event: Optional[TelemetryEvent] = None
@@ -217,11 +242,21 @@ class Correlator:
         Correlation time window (seconds) after the stimulus timestamp.
     skew_s:
         Allowed clock skew (seconds) between generator, SRX, and collector.
+    require_ground_truth:
+        Opt-in strict evidence mode: do not infer observation from telemetry
+        alone. A matching independent tuple is required for ``detected=YES``.
+        Neither mode proves a security action from egress presence.
     """
 
-    def __init__(self, window_s: float = 10.0, skew_s: float = 2.0):
+    def __init__(
+        self, window_s: float = 10.0, skew_s: float = 2.0,
+        *, require_ground_truth: bool = False,
+    ):
         self.window_s = float(window_s)
         self.skew_s = float(skew_s)
+        if any(not math.isfinite(v) or v < 0 for v in (self.window_s, self.skew_s)):
+            raise ValueError("Correlation window and skew must be finite and non-negative")
+        self.require_ground_truth = require_ground_truth
 
     # -- core matching --------------------------------------------------------
     def candidates(
@@ -236,7 +271,7 @@ class Correlator:
             ev
             for ev in events
             if ev.event_type == stimulus.expected_event_type
-            and five_tuple_matches(stimulus.five_tuple, ev.five_tuple)
+            and observation_matches(stimulus.five_tuple, ev.five_tuple)
             and within_window(
                 stimulus.timestamp, ev.timestamp, self.window_s, self.skew_s
             )
@@ -247,7 +282,11 @@ class Correlator:
     def correlate(
         self, stimulus: Stimulus, events: Iterable[TelemetryEvent]
     ) -> Optional[TelemetryEvent]:
-        """Return the single best-matching event (closest in time) or ``None``."""
+        """Return the closest match, or ``None``; equal distances use input order.
+
+        Events are not consumed: aggregate observations may support multiple
+        stimuli. Selection does not establish unique per-packet attribution.
+        """
         cands = self.candidates(stimulus, events)
         return cands[0] if cands else None
 
@@ -256,14 +295,15 @@ class Correlator:
     def saw_ground_truth(
         stimulus: Stimulus, ground_truth: Optional[Iterable[FiveTuple]]
     ) -> Optional[bool]:
-        """Did the stimulus cross the SRX, per independent ground truth (pcap)?
+        """Is a compatible tuple present in the supplied independent capture?
 
         Returns ``True``/``False`` when ground truth is supplied, or ``None``
-        when no ground-truth channel was provided (cannot determine).
+        when no ground-truth channel was provided. Absence is not proof that
+        traffic never reached the device; tuples carry no timestamps/path proof.
         """
         if ground_truth is None:
             return None
-        return any(five_tuple_matches(stimulus.five_tuple, gt) for gt in ground_truth)
+        return any(observation_matches(stimulus.five_tuple, gt) for gt in ground_truth)
 
     # -- verdict construction -------------------------------------------------
     def evaluate(
@@ -277,16 +317,17 @@ class Correlator:
         Decision logic (see ``docs/05-correlation-model.md``):
 
         * ``logged``  - YES if a correlating event was found, else NO.
-        * ``detected`` - from ground truth when available; otherwise inferred
-          from whether the event was logged (best effort).
+        * ``detected`` - legacy observation flag: independent tuple presence,
+          or telemetry inference when allowed. Never proof of security action.
         * ``fields_complete`` - YES if the matched event carries every expected
           field; NO with ``missing_fields`` populated; INCONCLUSIVE if nothing
           was logged.
 
-        Special case: if ground truth says the traffic never crossed the SRX
-        and nothing was logged, the result is INCONCLUSIVE (environment issue,
-        not an SRX detection gap).
+        Missing egress evidence is inconclusive, not proof of non-arrival.
+        ``require_ground_truth`` disables telemetry-only inference.
         """
+        from .assertions import field_complete
+
         events = list(events)
         matched = self.correlate(stimulus, events)
         gt = self.saw_ground_truth(stimulus, ground_truth)
@@ -297,33 +338,38 @@ class Correlator:
         # detected?
         if gt is True:
             detected = Detection.YES
-        elif gt is False:
-            detected = Detection.NO
-        else:  # no ground-truth channel: infer from logging
-            detected = Detection.YES if matched is not None else Detection.INCONCLUSIVE
+        elif gt is None and matched is not None and not self.require_ground_truth:
+            detected = Detection.YES
+        else:
+            detected = Detection.INCONCLUSIVE
 
         # fields complete?
         missing: List[str] = []
         if matched is None:
             fields_complete = Detection.INCONCLUSIVE
         else:
-            missing = [f for f in stimulus.expected_fields if not matched.fields.get(f)]
-            fields_complete = Detection.NO if missing else Detection.YES
+            complete, missing = field_complete(matched, stimulus.expected_fields)
+            fields_complete = Detection.YES if complete else Detection.NO
 
-        note = ""
-        # Disambiguate "SRX missed it" vs "traffic never arrived".
-        if gt is False and matched is None:
+        if gt is True:
             note = (
-                "Stimulus not seen in egress ground truth and not logged: "
-                "INCONCLUSIVE — traffic likely never crossed the SRX (check "
-                "routing/NAT/target), not a detection gap."
+                "Independent capture contains a compatible tuple; this supports "
+                "traffic observation, not proof of a security action."
             )
-            logged = Detection.INCONCLUSIVE
-        elif gt is True and matched is None:
+            if matched is None:
+                note += " Expected telemetry not found: possible logging gap; verify capture scope and policy."
+        elif gt is False:
             note = (
-                "Stimulus crossed the SRX (in egress ground truth) but no "
-                "correlating telemetry found: genuine detection/logging GAP."
+                "No compatible tuple in independent egress capture: INCONCLUSIVE. "
+                "Absence does not establish non-arrival or lack of security action "
+                "(blocking, capture loss, timing, NAT or path differences are possible)."
             )
+            if matched is None:
+                logged = Detection.INCONCLUSIVE
+        elif matched is not None and not self.require_ground_truth:
+            note = "Observation inferred from telemetry only; no independent evidence or proof of security action."
+        else:
+            note = "Independent evidence unavailable; observation is INCONCLUSIVE."
 
         return Verdict(
             detection_target=stimulus.detection_target or stimulus.payload_class,

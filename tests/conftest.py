@@ -31,6 +31,23 @@ if _PROJECT_ROOT not in sys.path:
 DEFAULT_CONFIG_PATH = os.path.join("config", "probe_config.yaml")
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--live-srx", action="store_true", default=False,
+        help="Explicitly allow live SRX tests in an authorized lab.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Ordinary pytest runs must not generate traffic or contact hardware."""
+    if config.getoption("--live-srx"):
+        return
+    skip_live = pytest.mark.skip(reason="Live hardware tests require --live-srx")
+    for item in items:
+        if item.get_closest_marker("requires_srx") is not None:
+            item.add_marker(skip_live)
+
+
 def pytest_configure(config):
     """Register the requires_srx marker (kept in sync with pytest.ini)."""
     config.addinivalue_line(

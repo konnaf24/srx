@@ -1,158 +1,245 @@
-"""wrk / iperf3 wrappers for scale generation (rows 15, 16, 17).
+"""Bounded wrk / iperf3 wrappers with checked execution and actual measurements.
 
-* :meth:`LoadGenerator.session_volume` - drive many concurrent HTTP sessions
-  with ``wrk`` (row 15: session-count threshold).
-* :meth:`LoadGenerator.throughput`     - drive a sustained throughput stream
-  with ``iperf3`` (row 16: byte counters) and underpin flow/IPFIX export
-  validation (row 17).
-
-Both wrap system binaries via ``subprocess`` with explicit argument builders and
-parse the tools' output into structured results. Missing binaries raise a clear
-error via :func:`generators.require_binary`. The argument builders and parsers
-are side-effect-free and unit-testable offline.
+Builders validate before resolving binaries. Direct APIs validate even in
+``run=False`` descriptor mode. Configure ceilings with ``WorkloadLimits``;
+raising them is an explicit caller decision for an authorized isolated lab.
+Execution success never establishes SRX detection or concurrent session count.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import List, Optional
+from urllib.parse import urlsplit
 
 from generators import require_binary
 from validation.correlator import FiveTuple, Stimulus
 
 
+def bounded_int(name: str, value: int, maximum: int, minimum: int = 1) -> int:
+    """Reject coercion, booleans, fractions, non-finite and out-of-range values."""
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be an integer in [{minimum}, {maximum}]")
+    return value
+
+
+@dataclass(frozen=True)
+class WorkloadLimits:
+    """Per-workload ceilings; defaults preserve existing CLI and API defaults.
+
+    Concurrent suites multiply per-workload load; these are not aggregate caps.
+    Every configurable ceiling must itself be a finite positive integer.
+    """
+
+    max_packets: int = 10000
+    max_rate_pps: int = 1000
+    max_ports: int = 4096
+    max_duration_s: int = 300
+    max_connections: int = 10000
+    max_threads: int = 64
+    max_parallel: int = 32
+    max_fragments: int = 64
+    max_workloads: int = 32
+
+    def __post_init__(self):
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{field.name} must be a finite positive integer")
+        bounded_int("max_ports", self.max_ports, 65535)
+
+    def wrk(self, connections: int, threads: int, duration_s: int) -> None:
+        bounded_int("connections", connections, self.max_connections)
+        bounded_int("threads", threads, min(self.max_threads, connections))
+        bounded_int("duration_s", duration_s, self.max_duration_s)
+
+    def iperf(self, duration_s: int, parallel: int, port: int) -> None:
+        bounded_int("duration_s", duration_s, self.max_duration_s)
+        bounded_int("parallel", parallel, self.max_parallel)
+        bounded_int("port", port, 65535)
+
+    def scan(self, max_ports: int) -> None:
+        bounded_int("max_ports", max_ports, self.max_ports)
+
+    def flood(self, flood_type: str, port: int, count: int, rate_pps: int) -> None:
+        if flood_type not in {"syn", "icmp", "udp"}:
+            raise ValueError("flood_type must be syn|icmp|udp")
+        bounded_int("port", port, 65535, 0 if flood_type == "icmp" else 1)
+        bounded_int("count", count, self.max_packets)
+        bounded_int("rate_pps", rate_pps, self.max_rate_pps)
+        # Integer ceiling avoids rounding pacing above the requested packet rate.
+        interval_us = (1_000_000 + rate_pps - 1) // rate_pps
+        if count * interval_us > self.max_duration_s * 1_000_000:
+            raise ValueError("paced flood exceeds max_duration_s")
+
+
+DEFAULT_LIMITS = WorkloadLimits()
+
+
+def _nonnegative_number(name: str, value) -> float:
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be a finite nonnegative number")
+    try:
+        valid = math.isfinite(value) and value >= 0
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{name} must be a finite nonnegative number")
+    return float(value)
+
+
 @dataclass
 class WrkResult:
-    """Parsed summary from a wrk run."""
+    """Measured HTTP requests, not measured concurrent TCP sessions."""
 
     requests: int
     duration_s: float
     requests_per_sec: float
     raw: str
+    socket_errors: int = 0
+    non_success_responses: int = 0
 
 
 @dataclass
 class Iperf3Result:
-    """Parsed summary from an iperf3 run."""
-
     bytes_sent: int
     bits_per_second: float
     raw: str
 
 
 class LoadGenerator:
-    """Drive session-volume and throughput load against a target."""
+    """Drive load; return a compatible Stimulus with execution metadata.
 
-    def __init__(self, dst_ip: str):
+    ``metadata['result']`` contains parsed measurements and raw stdout after a
+    successful run; ``stderr``, ``returncode`` and ``elapsed_s`` are retained.
+    Nonzero exits and timeouts raise standard subprocess exceptions (including
+    captured output); malformed summaries raise ValueError, never a zero result.
+    """
+
+    def __init__(self, dst_ip: str, *, limits: WorkloadLimits = DEFAULT_LIMITS):
         self.dst_ip = dst_ip
+        self.limits = limits
 
-    # -- row 15: session volume (wrk) -----------------------------------------
     @staticmethod
     def build_wrk_cmd(
-        url: str, connections: int, threads: int, duration_s: int
+        url: str, connections: int, threads: int, duration_s: int,
+        *, limits: WorkloadLimits = DEFAULT_LIMITS,
     ) -> List[str]:
-        """Build a wrk argument list."""
+        limits.wrk(connections, threads, duration_s)
+        LoadGenerator._http_port(url)
         binary = require_binary("wrk")
-        return [
-            binary,
-            "-c", str(int(connections)),
-            "-t", str(int(threads)),
-            "-d", f"{int(duration_s)}s",
-            "--latency",
-            url,
-        ]
+        return [binary, "-c", str(connections), "-t", str(threads),
+                "-d", f"{duration_s}s", "--latency", url]
+
+    @staticmethod
+    def _http_port(url: str) -> int:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("url must be an absolute HTTP(S) URL")
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+        return bounded_int("URL port", port, 65535)
 
     @staticmethod
     def parse_wrk_output(output: str) -> WrkResult:
-        """Parse wrk stdout into a :class:`WrkResult`."""
-        req = 0
-        dur = 0.0
-        rps = 0.0
-        m = re.search(r"([\d]+)\s+requests in\s+([\d.]+)([a-z]+)", output)
-        if m:
-            req = int(m.group(1))
-            val, unit = float(m.group(2)), m.group(3)
-            dur = val * {"s": 1, "ms": 0.001, "m": 60}.get(unit, 1)
-        m = re.search(r"Requests/sec:\s+([\d.]+)", output)
-        if m:
-            rps = float(m.group(1))
-        return WrkResult(requests=req, duration_s=dur, requests_per_sec=rps, raw=output)
-
-    def session_volume(
-        self,
-        url: str,
-        connections: int = 10000,
-        threads: int = 8,
-        duration_s: int = 30,
-        run: bool = False,
-    ) -> Stimulus:
-        """Drive high concurrent connection volume (validates session counters)."""
-        ts = time.time()
-        if run:
-            cmd = self.build_wrk_cmd(url, connections, threads, duration_s)
-            subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return Stimulus(
-            five_tuple=FiveTuple(None, self.dst_ip, "TCP", None, 80),
-            timestamp=ts,
-            expected_event_type="RT_FLOW_SESSION_CREATE",
-            payload_class="session-volume",
-            detection_target="Session volume",
-            expected_fields=("source-address", "destination-address"),
-            metadata={"connections": connections, "duration_s": duration_s},
+        summary = re.search(r"^\s*(\d+)\s+requests in\s+(\d+(?:\.\d+)?)(ms|s|m)\b", output, re.MULTILINE)
+        rate = re.search(r"^\s*Requests/sec:\s+(\d+(?:\.\d+)?)\s*(?:\n|$)", output, re.MULTILINE)
+        if not summary or not rate:
+            raise ValueError("wrk output missing a valid request/duration/rate summary")
+        duration = float(summary[2]) * {"s": 1, "ms": 0.001, "m": 60}[summary[3]]
+        rps = _nonnegative_number("requests_per_sec", float(rate[1]))
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("wrk duration must be finite and positive")
+        errors = re.search(r"Socket errors: connect (\d+), read (\d+), write (\d+), timeout (\d+)", output)
+        non_success = re.search(r"Non-2xx or 3xx responses:\s+(\d+)", output)
+        if ("Socket errors:" in output and errors is None) or (
+            "Non-2xx or 3xx responses:" in output and non_success is None
+        ):
+            raise ValueError("wrk output contains malformed error counters")
+        return WrkResult(
+            int(summary[1]), duration, rps, output,
+            sum(map(int, errors.groups())) if errors else 0,
+            int(non_success[1]) if non_success else 0,
         )
 
-    # -- row 16/17: throughput (iperf3) ---------------------------------------
+    @staticmethod
+    def _execute(cmd: List[str], duration_s: int, parser) -> dict:
+        started = time.monotonic()
+        completed = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=duration_s + 30,
+        )
+        completed.check_returncode()
+        result = parser(completed.stdout)
+        return {"execution_status": "succeeded", "detection_status": "not_evaluated",
+                "returncode": completed.returncode, "elapsed_s": time.monotonic() - started,
+                "stderr": completed.stderr, "result": asdict(result)}
+
+    def session_volume(
+        self, url: str, connections: int = 10000, threads: int = 8,
+        duration_s: int = 30, run: bool = False,
+    ) -> Stimulus:
+        self.limits.wrk(connections, threads, duration_s)
+        port = self._http_port(url)
+        ts = time.time()
+        metadata = {"connections": connections, "threads": threads, "duration_s": duration_s,
+                    "url": url, "execution_status": "not_run", "detection_status": "not_evaluated"}
+        if run:
+            cmd = self.build_wrk_cmd(url, connections, threads, duration_s, limits=self.limits)
+            metadata.update(self._execute(cmd, duration_s, self.parse_wrk_output))
+        return Stimulus(
+            five_tuple=FiveTuple(None, self.dst_ip, "TCP", None, port), timestamp=ts,
+            expected_event_type="RT_FLOW_SESSION_CREATE", payload_class="session-volume",
+            detection_target="Session volume", expected_fields=("source-address", "destination-address"),
+            metadata=metadata,
+        )
+
     @staticmethod
     def build_iperf3_cmd(
-        server: str, duration_s: int, parallel: int = 1, port: int = 5201
+        server: str, duration_s: int, parallel: int = 1, port: int = 5201,
+        *, limits: WorkloadLimits = DEFAULT_LIMITS,
     ) -> List[str]:
-        """Build an iperf3 client argument list (JSON output)."""
+        limits.iperf(duration_s, parallel, port)
         binary = require_binary("iperf3")
-        return [
-            binary,
-            "-c", server,
-            "-t", str(int(duration_s)),
-            "-P", str(int(parallel)),
-            "-p", str(int(port)),
-            "--json",
-        ]
+        return [binary, "-c", server, "-t", str(duration_s), "-P", str(parallel),
+                "-p", str(port), "--json"]
 
     @staticmethod
     def parse_iperf3_output(output: str) -> Iperf3Result:
-        """Parse iperf3 --json stdout into an :class:`Iperf3Result`."""
         data = json.loads(output)
-        end = data.get("end", {})
-        sum_sent = end.get("sum_sent", end.get("sum", {}))
-        return Iperf3Result(
-            bytes_sent=int(sum_sent.get("bytes", 0)),
-            bits_per_second=float(sum_sent.get("bits_per_second", 0.0)),
-            raw=output,
-        )
+        if not isinstance(data, dict) or "error" in data:
+            raise ValueError("iperf3 returned an error or invalid summary")
+        end = data.get("end")
+        if not isinstance(end, dict):
+            raise ValueError("iperf3 output missing end summary")
+        summary = end.get("sum_sent", end.get("sum"))
+        if not isinstance(summary, dict) or not {"bytes", "bits_per_second"} <= summary.keys():
+            raise ValueError("iperf3 output missing byte/rate measurements")
+        byte_count = summary["bytes"]
+        if type(byte_count) is not int or byte_count < 0:
+            raise ValueError("iperf3 bytes must be a nonnegative integer")
+        bps = _nonnegative_number("bits_per_second", summary["bits_per_second"])
+        return Iperf3Result(byte_count, bps, output)
 
     def throughput(
-        self,
-        server: Optional[str] = None,
-        duration_s: int = 30,
-        parallel: int = 4,
-        port: int = 5201,
-        run: bool = False,
+        self, server: Optional[str] = None, duration_s: int = 30, parallel: int = 4,
+        port: int = 5201, run: bool = False,
     ) -> Stimulus:
-        """Drive a sustained throughput stream (validates byte counters / J-Flow)."""
+        self.limits.iperf(duration_s, parallel, port)
         server = server or self.dst_ip
         ts = time.time()
+        metadata = {"duration_s": duration_s, "parallel": parallel,
+                    "execution_status": "not_run", "detection_status": "not_evaluated"}
         if run:
-            cmd = self.build_iperf3_cmd(server, duration_s, parallel, port)
-            subprocess.run(cmd, capture_output=True, text=True, check=False)
+            cmd = self.build_iperf3_cmd(server, duration_s, parallel, port, limits=self.limits)
+            metadata.update(self._execute(cmd, duration_s, self.parse_iperf3_output))
         return Stimulus(
-            five_tuple=FiveTuple(None, server, "TCP", None, port),
-            timestamp=ts,
-            expected_event_type="RT_FLOW_SESSION_CLOSE",
-            payload_class="throughput-stream",
+            five_tuple=FiveTuple(None, server, "TCP", None, port), timestamp=ts,
+            expected_event_type="RT_FLOW_SESSION_CLOSE", payload_class="throughput-stream",
             detection_target="Throughput",
             expected_fields=("source-address", "destination-address", "bytes-from-client"),
-            metadata={"duration_s": duration_s, "parallel": parallel},
+            metadata=metadata,
         )

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from .correlator import FiveTuple, TelemetryEvent, five_tuple_matches
+from .correlator import FiveTuple, TelemetryEvent, observation_matches
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ def find_events(
     for ev in events:
         if ev.event_type != event_type:
             continue
-        if five_tuple is not None and not five_tuple_matches(five_tuple, ev.five_tuple):
+        if five_tuple is not None and not observation_matches(five_tuple, ev.five_tuple):
             continue
         out.append(ev)
     return out
@@ -70,7 +70,8 @@ def field_complete(
 
     Returns ``(ok, missing)`` where ``missing`` lists absent/empty fields.
     A field counts as present only if its value is not ``None`` and not an
-    empty string.
+    empty string. Numeric zero and ``False`` are valid present values;
+    completeness does not assert their semantic correctness.
     """
     missing = [
         f
