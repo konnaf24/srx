@@ -131,6 +131,10 @@ full design.
 
 ## Install
 
+For the complete two-host setup, SRX collection configuration, workload and
+live-test validation, dashboard deployment, authenticated HTTPS exposure,
+persistence, upgrades, and troubleshooting, follow **[INSTALL.md](INSTALL.md)**.
+
 ### Base probe suite
 
 ```bash
