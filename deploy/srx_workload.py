@@ -25,6 +25,7 @@ subcommands require confirmation unless you pass --yes.
 from __future__ import annotations
 
 import argparse
+import json
 import socket
 import subprocess
 import sys
@@ -42,6 +43,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
+    from generators.web_crawler import crawl_page, target_url, validate_limits
     from generators.l7_client import L7Client
     from generators.scan_gen import ScanGenerator
     from generators.packet_gen import PacketGenerator
@@ -74,9 +76,12 @@ def validate_args(a: argparse.Namespace, command: str | None = None) -> None:
     """Validate all numeric controls before routing, prompting or sending."""
     limits = _limits(a)
     command = command or a.cmd
-    if hasattr(a, "port"):
+    if hasattr(a, "port") and a.port is not None:
         bounded_int("port", a.port, 65535, 0 if command == "flood" and a.type == "icmp" else 1)
-    if command == "all":
+    if command == "crawl":
+        validate_limits(a.max_bytes, a.timeout)
+        target_url(a.target, a.path, a.scheme, a.port)
+    elif command == "all":
         bounded_int("duration", a.duration, limits.max_duration_s)
     elif command == "scan":
         limits.scan(a.max_ports)
@@ -210,6 +215,16 @@ def confirm(cmd_name: str, target: str, assume_yes: bool) -> None:
 
 
 # --------------------------- workload implementations ---------------------------
+@validated
+def do_crawl(a):
+    result = crawl_page(target_url(a.target, a.path, a.scheme, a.port),
+                        max_bytes=a.max_bytes, timeout=a.timeout)
+    # Pretty JSON keeps bounded fields readable in dashboard line streaming.
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return CommandResult(0 if result["execution_status"] == "succeeded" else 1,
+                         error=result["error"], metadata={"result": result})
+
+
 @validated
 def do_http(a):
     hdr("HTTP GET (l7_client)")
@@ -529,6 +544,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("http", help="HTTP GET")
     sp.add_argument("--path", default="/"); sp.add_argument("--port", type=int, default=80)
     sp.set_defaults(func=do_http)
+
+    sp = sub.add_parser("crawl", help="Bounded single-page crawl (no redirects or assets)")
+    sp.add_argument("--path", default="/")
+    sp.add_argument("--scheme", choices=["http", "https"], default="http")
+    sp.add_argument("--port", type=int, default=None, help="Default: 80 for HTTP, 443 for HTTPS")
+    sp.add_argument("--max-bytes", type=int, default=1024 * 1024, help="Body byte cap (1..4194304)")
+    sp.add_argument("--timeout", type=int, default=10, help="Global deadline in seconds (1..30)")
+    sp.set_defaults(func=do_crawl)
 
     sp = sub.add_parser("dns", help="UDP DNS query")
     sp.add_argument("--qname", default="probe.lab")

@@ -24,7 +24,7 @@ import re
 from collections import OrderedDict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, unquote
 
 REPO = Path(__file__).resolve().parent
 PORT = int(os.environ.get("SRX_DASH_PORT", "8081"))
@@ -78,6 +78,13 @@ WORKLOADS = OrderedDict([
     ("http",       {"desc": "Benign HTTP GET (App-ID generic, session create)",
                     "root": False, "aggressive": False,
                     "params": [("port", "int", 80, None), ("path", "str", "/", None)]}),
+    ("crawl",      {"desc": "Benign single-page crawl: title, text and links (no redirects/assets)",
+                    "root": False, "aggressive": False,
+                    "params": [("path", "str", "/", None),
+                               ("port", "int", 80, None),
+                               ("scheme", "str", "http", ["http", "https"]),
+                               ("max-bytes", "int", 1048576, None),
+                               ("timeout", "int", 10, None)]}),
     ("dns",        {"desc": "UDP DNS query (App-ID generic)",
                     "root": False, "aggressive": False,
                     "params": [("qname", "str", "probe.lab", None)]}),
@@ -393,7 +400,8 @@ def validate_request(body):
     # Mirror default CLI WorkloadLimits without importing generator dependencies.
     limits = {"port": 65535, "max-ports": 4096, "ttl": 255,
               "duration": 300, "count": 64 if wl == "frag" else 10000, "rate": 1000,
-              "connections": 10000, "threads": 64, "parallel": 32}
+              "connections": 10000, "threads": 64, "parallel": 32,
+              "max-bytes": 4194304, "timeout": 30}
     clean = {}
     for name, kind, default, choices in WORKLOADS[wl]["params"]:
         value = params.get(name, default)
@@ -412,6 +420,11 @@ def validate_request(body):
                 raise ValueError("invalid " + name)
             if name == "path" and not value.startswith("/"):
                 raise ValueError("path must start with /")
+            if wl == "crawl" and name == "path" and (
+                    value.startswith("//") or "\\" in value or "#" in value
+                    or any(ord(c) <= 32 or ord(c) >= 127 for c in value)
+                    or re.search(r"[\x00-\x1f\x7f\\]", unquote(value))):
+                raise ValueError("crawl path must be target-relative without controls or fragments")
             if name == "qname" and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value):
                 raise ValueError("invalid qname")
         clean[name] = value
